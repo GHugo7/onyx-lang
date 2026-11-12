@@ -12,6 +12,7 @@ mod parser;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -28,7 +29,8 @@ Usage:
 
 Options (before the file name):
   --target js                      Compile to JavaScript and run with Node.js (default)
-  --target native                  Compile to a Linux x86-64 executable (experimental)";
+  --target native                  Compile to a Linux x86-64 executable (experimental)
+  --leak-check                     Native only: fail at exit if some memory was never released";
 
 #[derive(Clone, Copy, PartialEq)]
 enum Target {
@@ -79,19 +81,32 @@ fn source_arg(args: &[String]) -> PathBuf {
     }
 }
 
-/// Removes a leading `--target <name>` from the arguments.
+/// Set by `--leak-check`: native programs verify at exit that all memory was released.
+static LEAK_CHECK: AtomicBool = AtomicBool::new(false);
+
+/// Removes the leading options (`--target <name>`, `--leak-check`) from the arguments.
 fn take_target(args: &[String]) -> (Target, Vec<String>) {
-    if args.first().map(String::as_str) != Some("--target") {
-        return (Target::Js, args.to_vec());
+    let mut target = Target::Js;
+    let mut i = 0;
+    loop {
+        match args.get(i).map(String::as_str) {
+            Some("--target") => {
+                target = match args.get(i + 1).map(String::as_str) {
+                    Some("js") => Target::Js,
+                    Some("native") => Target::Native,
+                    Some("jvm") => die("the JVM target is not implemented yet"),
+                    Some(other) => die(&format!("unknown target `{other}` (available: js, native)")),
+                    None => die("`--target` needs a value (available: js, native)"),
+                };
+                i += 2;
+            }
+            Some("--leak-check") => {
+                LEAK_CHECK.store(true, Ordering::Relaxed);
+                i += 1;
+            }
+            _ => return (target, args[i..].to_vec()),
+        }
     }
-    let target = match args.get(1).map(String::as_str) {
-        Some("js") => Target::Js,
-        Some("native") => Target::Native,
-        Some("jvm") => die("the JVM target is not implemented yet"),
-        Some(other) => die(&format!("unknown target `{other}` (available: js, native)")),
-        None => die("`--target` needs a value (available: js, native)"),
-    };
-    (target, args[2..].to_vec())
 }
 
 /// Compiles a source file, printing diagnostics and exiting on error.
@@ -124,7 +139,7 @@ fn compile(path: &Path, test_mode: bool, target: Target) -> Output {
             &analysis,
             &codegen_js::Options { sources: &sources, test_mode },
         )),
-        Target::Native => match native::generate(&program, &analysis) {
+        Target::Native => match native::generate(&program, &analysis, LEAK_CHECK.load(Ordering::Relaxed)) {
             Ok(bytes) => Output::Native(bytes),
             Err(diags) => report(&diags),
         },

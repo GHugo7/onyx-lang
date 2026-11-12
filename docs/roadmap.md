@@ -19,8 +19,8 @@ for what works today.
 
 1. **Native core** (done): integers, booleans, strings, functions, control
    flow, modules. The runtime is written in Onyx.
-2. **Heap types**: structs, lists and maps, with reference counting instead
-   of a garbage collector.
+2. **Heap types** (done for structs and lists; maps are next), with
+   reference counting instead of a garbage collector.
 3. **The rest of the language** on the native target: floats, error handling,
    lambdas, files, `fork` and channels.
 4. **Self-hosting**: the compiler rewritten in Onyx.

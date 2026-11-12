@@ -119,6 +119,8 @@ pub struct Analysis {
     /// Keys (see `fn_key` etc.) of the functions that must be compiled as async.
     pub async_keys: HashSet<String>,
     pub structs: HashMap<String, StructInfo>,
+    /// Signatures of the top-level functions.
+    pub fns: HashMap<String, Rc<FnSig>>,
     /// `catch` expressions whose block ends with a value.
     pub catch_values: HashSet<usize>,
 }
@@ -165,6 +167,7 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "__state" => (vec![], Int, false, false),
         "__str_ptr" => (vec![Str], Int, false, false),
         "__ptr_str" => (vec![Int], Str, false, false),
+        "__td_string" => (vec![], Int, false, false),
         _ => return None,
     })
 }
@@ -245,6 +248,7 @@ pub fn check(
     c.run(program, require_main);
     if c.diags.is_empty() {
         c.an.structs = c.structs;
+        c.an.fns = c.fns;
         Ok(c.an)
     } else {
         c.diags.sort_by_key(|d| d.span.start);

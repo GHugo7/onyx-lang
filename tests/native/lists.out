@@ -1,0 +1,15 @@
+[5, 3, 8, 1, 4] 5 5 4 true false 2 -1
+[1, 3, 4, 5, 8] [4, 1, 8, 3, 5] [3, 8] [1, 4] []
+[50, 7, 4, 16, 1, 4, 9] 50 [7, 4, 16, 1, 4, 9]
+[] 0 [0, 1, 4, 9, 16, 25] []
+true false true true
+1000 499500 999 501 -1
+["pear", "apple", "fig", "kiwi!"] pear, apple, fig, kiwi! ["apple", "fig", "kiwi!", "pear"] true 3
+pears apples fig ["pears", "apples", "kiwi!"] 1-2-3
+["say \"hi\"", "tab\there", "back\\slash"]
+44 ["pen", "book", "lamp"] Item{name: "book", price: 12} lamp
+[Item{name: "pen", price: 3}, Item{name: "notebook", price: 5}, Item{name: "lamp", price: 30}] true -1
+[[1, 2, 3], [4, 50, 6], [7, 8, 9]] 50 3 [1, 3, 7]
+[1, 2, 3, 11, 12]
+5 c Node{label: "a", children: [Node{label: "d", children: []}]}
+[-7, -1, -1, 0, 2, 3, 3] ["", "a", "a", "b", "c"] [0]

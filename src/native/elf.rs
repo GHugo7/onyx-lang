@@ -6,6 +6,9 @@ const EHDR_SIZE: u64 = 64;
 const PHDR_SIZE: u64 = 56;
 const PHDR_COUNT: u64 = 2;
 
+/// Address at which the first byte of the image (right after the headers) is loaded.
+pub const IMAGE_BASE: u64 = BASE + EHDR_SIZE + PHDR_SIZE * PHDR_COUNT;
+
 /// `image` is the code buffer; `entry` is the offset of the first instruction in it.
 pub fn write(image: &[u8], entry: usize) -> Vec<u8> {
     let headers = EHDR_SIZE + PHDR_SIZE * PHDR_COUNT;

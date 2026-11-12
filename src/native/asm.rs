@@ -55,6 +55,8 @@ pub struct Asm {
     labels: Vec<Option<usize>>,
     /// (position of a rel32 field, label it refers to)
     fixups: Vec<(usize, Label)>,
+    /// (position of a 64-bit absolute address, label it refers to)
+    abs_fixups: Vec<(usize, Label)>,
 }
 
 fn rex(w: bool, reg: Reg, base: Reg) -> u8 {
@@ -193,6 +195,14 @@ impl Asm {
         self.rel32(label);
     }
 
+    /// Calls the function whose address is in `r`.
+    pub fn call_reg(&mut self, r: Reg) {
+        if r >= 8 {
+            self.buf.push(0x41);
+        }
+        self.buf.extend_from_slice(&[0xFF, 0xC0 | 2 << 3 | (r & 7)]);
+    }
+
     pub fn ret(&mut self) {
         self.buf.push(0xC3);
     }
@@ -216,6 +226,16 @@ impl Asm {
         self.buf.extend_from_slice(data);
     }
 
+    pub fn word(&mut self, v: u64) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// Emits the absolute address of `label` as data.
+    pub fn address(&mut self, label: Label) {
+        self.abs_fixups.push((self.buf.len(), label));
+        self.word(0);
+    }
+
     pub fn align(&mut self, n: usize) {
         while self.buf.len() % n != 0 {
             self.buf.push(0);
@@ -223,7 +243,12 @@ impl Asm {
     }
 
     /// Resolves every label reference and returns the finished buffer.
-    pub fn finish(mut self) -> Vec<u8> {
+    /// `base` is the address at which the buffer will be loaded.
+    pub fn finish(mut self, base: u64) -> Vec<u8> {
+        for (pos, label) in std::mem::take(&mut self.abs_fixups) {
+            let target = base + self.labels[label.0].expect("unbound label") as u64;
+            self.buf[pos..pos + 8].copy_from_slice(&target.to_le_bytes());
+        }
         for (pos, label) in std::mem::take(&mut self.fixups) {
             let target = self.labels[label.0].expect("unbound label") as i64;
             let rel = target - (pos as i64 + 4);

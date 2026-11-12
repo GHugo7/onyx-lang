@@ -149,12 +149,14 @@ mod native {
     }
 
     /// Native programs must print their `.out` file, and exactly what the
-    /// JavaScript target prints for the same source.
+    /// JavaScript target prints for the same source. They must also have
+    /// released every object by the time they exit.
     #[test]
     fn native_and_javascript_agree() {
         for file in programs("tests/native") {
             let expected = std::fs::read_to_string(file.with_extension("out")).unwrap();
-            let native = Command::new(ONYX).args(["run", "--target", "native"]).arg(&file).output().unwrap();
+            let native =
+                Command::new(ONYX).args(["run", "--target", "native", "--leak-check"]).arg(&file).output().unwrap();
             let js = Command::new(ONYX).arg("run").arg(&file).output().unwrap();
             assert!(native.status.success(), "{}: {}", file.display(), String::from_utf8_lossy(&native.stderr));
             assert_eq!(String::from_utf8_lossy(&native.stdout), expected, "{}", file.display());
@@ -191,9 +193,31 @@ mod native {
 
     #[test]
     fn unsupported_features_are_reported_not_miscompiled() {
-        let out = run_source("list.ox", "fn main() {\n    var xs = [1, 2]\n    print(xs.len())\n}\n");
+        let out = run_source("map.ox", "fn main() {\n    var ages = {\"a\": 1}\n    print(ages.len())\n}\n");
         assert_eq!(out.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&out.stderr).contains("error[E0500]"));
+    }
+
+    #[test]
+    fn out_of_bounds_access_panics() {
+        let out = run_source("bounds.ox", "fn main() {\n    var xs = [1, 2, 3]\n    print(xs[3])\n}\n");
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "panic: index out of bounds: index 3, length 3\n");
+    }
+
+    /// Reference counting cannot free objects that point to each other; the
+    /// leak check must notice (and so proves that it really counts).
+    #[test]
+    fn leak_check_reports_cycles() {
+        let dir = std::env::temp_dir().join(format!("onyx-native-leak-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("cycle.ox");
+        let src = "struct Node {\n    friends: [Node]\n}\n\nfn main() {\n    var a = Node{friends: []}\n    var b = Node{friends: []}\n    a.friends.push(b)\n    b.friends.push(a)\n}\n";
+        std::fs::write(&file, src).unwrap();
+        let out = Command::new(ONYX).args(["run", "--target", "native", "--leak-check"]).arg(&file).output().unwrap();
+        assert_eq!(out.status.code(), Some(3));
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "leak check: 4 object(s) were never released\n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

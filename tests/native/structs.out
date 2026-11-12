@@ -1,0 +1,13 @@
+Point{x: 3, y: -4} 3 -4 7
+Empty{} Point{x: 2, y: 1}
+Point{x: 14, y: 7} true false true
+Alicia at (7, 2) true true
+Player{name: "Alicia", position: Point{x: 7, y: 2}, alive: true}
+Point{x: 10, y: 2}
+Alicia! false
+Point{x: 2, y: 4}
+a dog has 4 legs | a owl has 2 legs
+dog crow Bird{species: "crow"}
+true false true
+Hello, Bob created: 2
+0
