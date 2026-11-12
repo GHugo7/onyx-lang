@@ -158,6 +158,13 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "sqrt" => (vec![Float], Float, false, false),
         "pow" => (vec![Float, Float], Float, false, false),
         "floor" | "ceil" | "round" => (vec![Float], Int, false, false),
+        // Low-level operations of the native runtime (see src/native/runtime.ox).
+        "__syscall" => (vec![Int; 7], Int, false, false),
+        "__load8" | "__load64" => (vec![Int], Int, false, false),
+        "__store8" | "__store64" => (vec![Int, Int], Void, false, false),
+        "__state" => (vec![], Int, false, false),
+        "__str_ptr" => (vec![Str], Int, false, false),
+        "__ptr_str" => (vec![Int], Str, false, false),
         _ => return None,
     })
 }
@@ -210,10 +217,17 @@ struct Checker<'a> {
     /// The one `catch` expression allowed at the current statement: (id, needs a value).
     catch_slot: Option<(usize, bool)>,
     async_info: HashMap<String, AsyncInfo>,
+    /// Byte range of the native runtime's source; `__` names are only visible there.
+    runtime: Option<(usize, usize)>,
     an: Analysis,
 }
 
-pub fn check(program: &Program, src: &str, require_main: bool) -> Result<Analysis, Vec<Diagnostic>> {
+pub fn check(
+    program: &Program,
+    src: &str,
+    require_main: bool,
+    runtime: Option<(usize, usize)>,
+) -> Result<Analysis, Vec<Diagnostic>> {
     let mut c = Checker {
         src,
         diags: Vec::new(),
@@ -225,6 +239,7 @@ pub fn check(program: &Program, src: &str, require_main: bool) -> Result<Analysi
         handling: HashSet::new(),
         catch_slot: None,
         async_info: HashMap::new(),
+        runtime,
         an: Analysis::default(),
     };
     c.run(program, require_main);
@@ -1244,6 +1259,17 @@ impl<'a> Checker<'a> {
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr], expected: Option<&Type>) -> (Type, bool) {
         match &callee.kind {
             ExprKind::Ident(name) if self.lookup(name).is_none() => {
+                let internal = name.starts_with("__")
+                    && !self.runtime.is_some_and(|(start, end)| e.span.start >= start && e.span.end <= end);
+                if internal {
+                    self.err(Diagnostic::new("E0100", format!("unknown function `{name}`"), callee.span)
+                        .label("not found")
+                        .help("names starting with `__` are reserved for the Onyx runtime"));
+                    for a in args {
+                        self.expr(a, None);
+                    }
+                    return (Type::Unknown, false);
+                }
                 if let Some(sig) = self.fns.get(name).cloned() {
                     self.args(&sig.params, args, e, &format!("`{name}`"));
                     self.an.calls.insert(e.id, CallKind::Fn(name.clone()));

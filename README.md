@@ -42,9 +42,10 @@ fn main() {
 The compiler is written in Rust with no dependencies. Source files use the
 `.ox` extension.
 
-> **Status: v0.1, early.** The language core works and is tested, and programs
-> compile to JavaScript. The JVM target (and with it Minecraft plugins) is the
-> next milestone. See the [roadmap](docs/roadmap.md).
+> **Status: v0.1, early.** The language core works and is tested. Programs
+> compile to JavaScript, and an experimental [native target](docs/native.md)
+> writes Linux executables directly, with no other tool involved. See the
+> [roadmap](docs/roadmap.md).
 
 ## Install
 
@@ -62,6 +63,7 @@ onyx run hello.ox          # compile and run
 onyx check hello.ox        # type-check only
 onyx test hello.ox         # run the file's `check` blocks
 onyx build hello.ox        # write build/hello.js
+onyx build --target native hello.ox   # write build/hello, a Linux executable
 onyx explain E0200         # explain an error code
 ```
 
@@ -196,6 +198,7 @@ check "add works" {
 
 - [The Onyx Book](docs/book/README.md): a guided tour, chapter by chapter
 - [Standard library reference](docs/stdlib.md)
+- [The native target](docs/native.md)
 - [Examples](examples)
 - [Roadmap](docs/roadmap.md)
 
@@ -208,7 +211,8 @@ cargo test        # runs every program in tests/ and every example in the docs
 
 The pipeline is `lexer.rs` → `parser.rs` → `modules.rs` (imports) →
 `checker.rs` → `codegen_js.rs`,
-with the JavaScript runtime in `src/runtime.js`. To add a test, drop a `.ox`
+with the JavaScript runtime in `src/runtime.js`. The native backend lives in
+`src/native` and its runtime is written in Onyx (`src/native/runtime.ox`). To add a test, drop a `.ox`
 file and its expected `.out` in `tests/run`, or a program that must be rejected
 in `tests/errors` with `// error: E....` on its first line.
 

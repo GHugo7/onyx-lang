@@ -6,6 +6,7 @@ mod codegen_js;
 mod diagnostics;
 mod lexer;
 mod modules;
+mod native;
 mod parser;
 
 use std::io::IsTerminal;
@@ -19,14 +20,27 @@ Onyx - a small, statically typed programming language
 
 Usage:
   onyx run <file.ox> [args...]     Compile and run a program
-  onyx build <file.ox> [-o <out>]  Compile to JavaScript (default: build/<name>.js)
+  onyx build <file.ox> [-o <out>]  Compile to build/<name>.js, or build/<name> with --target native
   onyx check <file.ox>             Check a program for errors without running it
   onyx test <file.ox>              Run the `check` blocks of a file
   onyx explain <code>              Explain an error code, e.g. `onyx explain E0200`
   onyx version                     Print the version
 
-Options:
-  --target js                      Compilation target (only `js` for now)";
+Options (before the file name):
+  --target js                      Compile to JavaScript and run with Node.js (default)
+  --target native                  Compile to a Linux x86-64 executable (experimental)";
+
+#[derive(Clone, Copy, PartialEq)]
+enum Target {
+    Js,
+    Native,
+}
+
+/// What the compiler produced.
+enum Output {
+    Js(String),
+    Native(Vec<u8>),
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -40,8 +54,9 @@ fn main() {
         "test" => run(rest, true),
         "build" => build(rest),
         "check" => {
-            let file = source_arg(rest);
-            compile(&file, false);
+            let (target, rest) = take_target(rest);
+            let file = source_arg(&rest);
+            compile(&file, false, target);
             println!("ok: {} has no errors", file.display());
         }
         "explain" => explain(rest),
@@ -64,12 +79,28 @@ fn source_arg(args: &[String]) -> PathBuf {
     }
 }
 
-/// Compiles a source file to JavaScript, printing diagnostics and exiting on error.
-fn compile(path: &Path, test_mode: bool) -> String {
+/// Removes a leading `--target <name>` from the arguments.
+fn take_target(args: &[String]) -> (Target, Vec<String>) {
+    if args.first().map(String::as_str) != Some("--target") {
+        return (Target::Js, args.to_vec());
+    }
+    let target = match args.get(1).map(String::as_str) {
+        Some("js") => Target::Js,
+        Some("native") => Target::Native,
+        Some("jvm") => die("the JVM target is not implemented yet"),
+        Some(other) => die(&format!("unknown target `{other}` (available: js, native)")),
+        None => die("`--target` needs a value (available: js, native)"),
+    };
+    (target, args[2..].to_vec())
+}
+
+/// Compiles a source file, printing diagnostics and exiting on error.
+fn compile(path: &Path, test_mode: bool, target: Target) -> Output {
     let file = path.to_string_lossy();
     let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut sources = diagnostics::SourceMap::default();
-    let loaded = modules::load(path, &mut sources);
+    let prelude = (target == Target::Native).then_some(("<onyx runtime>", native::RUNTIME_SOURCE));
+    let loaded = modules::load(path, &mut sources, prelude);
     let report = |diags: &[diagnostics::Diagnostic]| -> ! {
         for d in diags {
             eprintln!("{}", diagnostics::render(d, &sources, color));
@@ -78,56 +109,93 @@ fn compile(path: &Path, test_mode: bool) -> String {
         eprintln!("error: could not compile `{file}` ({n} error{})", if n == 1 { "" } else { "s" });
         exit(1);
     };
-    let program = match loaded {
-        Ok(program) => program,
+    let (program, runtime) = match loaded {
+        Ok(loaded) => loaded,
         Err(Ok(diags)) => report(&diags),
         Err(Err(message)) => die(&message),
     };
-    let analysis = match checker::check(&program, &sources.text, !test_mode) {
+    let analysis = match checker::check(&program, &sources.text, !test_mode, runtime) {
         Ok(analysis) => analysis,
         Err(diags) => report(&diags),
     };
-    codegen_js::generate(&program, &analysis, &codegen_js::Options { sources: &sources, test_mode })
+    match target {
+        Target::Js => Output::Js(codegen_js::generate(
+            &program,
+            &analysis,
+            &codegen_js::Options { sources: &sources, test_mode },
+        )),
+        Target::Native => match native::generate(&program, &analysis) {
+            Ok(bytes) => Output::Native(bytes),
+            Err(diags) => report(&diags),
+        },
+    }
 }
 
-fn check_target(args: &[String]) -> Vec<String> {
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--target" {
-            match args.get(i + 1).map(|s| s.as_str()) {
-                Some("js") => {}
-                Some("jvm") => die("the JVM target is not implemented yet; it is next on the roadmap"),
-                Some(other) => die(&format!("unknown target `{other}` (available: js)")),
-                None => die("`--target` needs a value (available: js)"),
-            }
-            i += 2;
-        } else {
-            rest.push(args[i].clone());
-            i += 1;
-        }
+fn write_output(path: &Path, output: &Output) {
+    let result = match output {
+        Output::Js(js) => std::fs::write(path, js),
+        Output::Native(bytes) => std::fs::write(path, bytes).and_then(|_| make_executable(path)),
+    };
+    if let Err(e) = result {
+        die(&format!("cannot write `{}`: {e}", path.display()));
     }
-    rest
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn stem_of(file: &Path) -> String {
+    file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
 }
 
 fn run(args: &[String], test_mode: bool) {
-    let file = source_arg(args);
-    let js = compile(&file, test_mode);
-    let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let tmp = std::env::temp_dir().join(format!("onyx-{}-{stem}.js", std::process::id()));
-    if let Err(e) = std::fs::write(&tmp, js) {
-        die(&format!("cannot write `{}`: {e}", tmp.display()));
+    let (target, args) = take_target(args);
+    let file = source_arg(&args);
+    if test_mode && target == Target::Native {
+        die("`onyx test` does not support the native target yet");
     }
-    let status = Command::new("node").arg(&tmp).args(&args[1..]).status();
+    let output = compile(&file, test_mode, target);
+    let extension = if target == Target::Js { ".js" } else { "" };
+    let tmp = std::env::temp_dir().join(format!("onyx-{}-{}{extension}", std::process::id(), stem_of(&file)));
+    write_output(&tmp, &output);
+    let status = match target {
+        Target::Js => Command::new("node").arg(&tmp).args(&args[1..]).status(),
+        Target::Native => Command::new(&tmp).args(&args[1..]).status(),
+    };
     let _ = std::fs::remove_file(&tmp);
     match status {
-        Ok(status) => exit(status.code().unwrap_or(2)),
+        Ok(status) => exit(exit_code(status)),
+        Err(e) if target == Target::Native => die(&format!("cannot run the compiled program: {e}")),
         Err(_) => die("Onyx needs Node.js to run programs, but `node` was not found.\nInstall it from https://nodejs.org or use `onyx build` to only produce the .js file."),
     }
 }
 
+/// The exit code of a child, with the shell convention 128 + signal when it was killed.
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            eprintln!("fatal: the program was killed by signal {signal}");
+            return 128 + signal;
+        }
+    }
+    2
+}
+
 fn build(args: &[String]) {
-    let args = check_target(args);
+    let (target, args) = take_target(args);
     let file = source_arg(&args);
     let mut out: Option<PathBuf> = None;
     let mut i = 1;
@@ -140,10 +208,10 @@ fn build(args: &[String]) {
             other => die(&format!("unknown option `{other}`")),
         }
     }
-    let js = compile(&file, false);
+    let output = compile(&file, false, target);
     let out = out.unwrap_or_else(|| {
-        let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        Path::new("build").join(format!("{stem}.js"))
+        let extension = if target == Target::Js { ".js" } else { "" };
+        Path::new("build").join(format!("{}{extension}", stem_of(&file)))
     });
     if let Some(dir) = out.parent() {
         if !dir.as_os_str().is_empty() {
@@ -152,9 +220,7 @@ fn build(args: &[String]) {
             }
         }
     }
-    if let Err(e) = std::fs::write(&out, js) {
-        die(&format!("cannot write `{}`: {e}", out.display()));
-    }
+    write_output(&out, &output);
     println!("built {} -> {}", file.display(), out.display());
 }
 

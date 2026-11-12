@@ -134,3 +134,87 @@ fn documentation_examples_compile() {
     assert!(checked > 10, "expected to find documentation examples, found {checked}");
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+
+/// The native target writes Linux x86-64 executables, so these tests only run there.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod native {
+    use super::*;
+
+    fn run_source(name: &str, src: &str) -> std::process::Output {
+        let dir = std::env::temp_dir().join(format!("onyx-native-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(name);
+        std::fs::write(&file, src).unwrap();
+        Command::new(ONYX).args(["run", "--target", "native"]).arg(&file).output().unwrap()
+    }
+
+    /// Native programs must print their `.out` file, and exactly what the
+    /// JavaScript target prints for the same source.
+    #[test]
+    fn native_and_javascript_agree() {
+        for file in programs("tests/native") {
+            let expected = std::fs::read_to_string(file.with_extension("out")).unwrap();
+            let native = Command::new(ONYX).args(["run", "--target", "native"]).arg(&file).output().unwrap();
+            let js = Command::new(ONYX).arg("run").arg(&file).output().unwrap();
+            assert!(native.status.success(), "{}: {}", file.display(), String::from_utf8_lossy(&native.stderr));
+            assert_eq!(String::from_utf8_lossy(&native.stdout), expected, "{}", file.display());
+            assert_eq!(String::from_utf8_lossy(&js.stdout), expected, "{} on the JavaScript target", file.display());
+        }
+    }
+
+    #[test]
+    fn integers_are_64_bits() {
+        let out = run_source(
+            "big.ox",
+            "fn main() {\n    var min = -9223372036854775807 - 1\n    print(9223372036854775807, min, min / -1, min % -1)\n}\n",
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "9223372036854775807 -9223372036854775808 -9223372036854775808 0\n"
+        );
+    }
+
+    #[test]
+    fn failures_set_the_exit_code() {
+        let out = run_source("zero.ox", "fn main() {\n    var z = 0\n    print(1 / z)\n}\n");
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "panic: division by zero\n");
+
+        let out = run_source("exit.ox", "fn main() {\n    print(\"before\")\n    exit(7)\n    print(\"after\")\n}\n");
+        assert_eq!(out.status.code(), Some(7));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "before\n");
+
+        let out = run_source("panic.ox", "fn main() {\n    panic(\"oops\")\n}\n");
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "panic: oops\n");
+    }
+
+    #[test]
+    fn unsupported_features_are_reported_not_miscompiled() {
+        let out = run_source("list.ox", "fn main() {\n    var xs = [1, 2]\n    print(xs.len())\n}\n");
+        assert_eq!(out.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("error[E0500]"));
+    }
+
+    #[test]
+    fn runtime_internals_are_hidden_from_programs() {
+        let out = run_source("internal.ox", "fn main() {\n    print(__load64(0))\n    __rt_exit(3)\n}\n");
+        assert_eq!(out.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("error[E0100]"));
+    }
+
+    #[test]
+    fn built_executables_are_standalone() {
+        let dir = std::env::temp_dir().join(format!("onyx-native-build-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("hello.ox");
+        let exe = dir.join("hello");
+        std::fs::write(&source, "fn main() {\n    print(\"standalone\")\n}\n").unwrap();
+        let status = Command::new(ONYX).args(["build", "--target", "native"]).arg(&source).arg("-o").arg(&exe).status().unwrap();
+        assert!(status.success());
+        // No PATH, no environment: the program needs nothing but the kernel.
+        let out = Command::new(&exe).env_clear().output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "standalone\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

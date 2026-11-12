@@ -11,14 +11,27 @@
 - Modules: `import "file"` with namespaced access and private names
 - JavaScript backend; `onyx run` uses Node.js
 
-## Next
+## In progress: the native target
 
-1. **JVM backend.** `onyx build --target jvm` producing a `.jar`, with `fork`
-   mapped to real threads.
-2. **Java interop and Minecraft.** Use Java classes from Onyx, then an
-   `OnyxLoader` plugin for Paper servers that loads `.ox` scripts directly.
-3. **Web.** Run `.ox` files in the browser, DOM bindings, an online playground.
-4. **A game library** (`onyx.game`) shared by the web and desktop targets.
+Onyx is moving towards being self-sufficient: the compiler writes executables
+itself, without a C compiler or Node.js. See [the native target](native.md)
+for what works today.
+
+1. **Native core** (done): integers, booleans, strings, functions, control
+   flow, modules. The runtime is written in Onyx.
+2. **Heap types**: structs, lists and maps, with reference counting instead
+   of a garbage collector.
+3. **The rest of the language** on the native target: floats, error handling,
+   lambdas, files, `fork` and channels.
+4. **Self-hosting**: the compiler rewritten in Onyx.
+
+## Later
+
+- **JVM backend** for Minecraft plugins (memory handled by the JVM), with an
+  `OnyxLoader` plugin for Paper servers that loads `.ox` scripts directly.
+- **Web**: run `.ox` files in the browser, DOM bindings, an online playground.
+- **A game library** (`onyx.game`).
+- More systems for the native target: ARM64, Windows, macOS.
 
 ## Language features under consideration
 
@@ -29,6 +42,8 @@
 - A formatter (`onyx fmt`) and an editor extension with syntax highlighting
 
 ## Known limitations of v0.1
+
+These concern the JavaScript target; see [native.md](native.md) for the native one.
 
 - `int` is a JavaScript number: exact up to 2^53, not a 64-bit integer.
 - A float that holds a whole number prints as `2.0` on its own, but as `2`

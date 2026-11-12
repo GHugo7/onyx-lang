@@ -44,7 +44,14 @@ fn is_identifier(s: &str) -> bool {
 
 /// Loads `entry` and everything it imports. On an unreadable entry file the
 /// error has no source location, so it is returned as a plain message.
-pub fn load(entry: &Path, sources: &mut SourceMap) -> Result<Program, Result<Vec<Diagnostic>, String>> {
+///
+/// `prelude` is extra source appended to the program as is (the native
+/// runtime); its byte range in `sources` is returned along with the program.
+pub fn load(
+    entry: &Path,
+    sources: &mut SourceMap,
+    prelude: Option<(&str, &str)>,
+) -> Result<(Program, Option<(usize, usize)>), Result<Vec<Diagnostic>, String>> {
     let text = std::fs::read_to_string(entry)
         .map_err(|e| Err(format!("cannot read `{}`: {e}", entry.display())))?;
     let canonical = std::fs::canonicalize(entry).unwrap_or_else(|_| entry.to_path_buf());
@@ -80,8 +87,15 @@ pub fn load(entry: &Path, sources: &mut SourceMap) -> Result<Program, Result<Vec
             }
         }
     }
+    let mut prelude_range = None;
+    if let Some((name, text)) = prelude {
+        let (start, end) = loader.sources.add(name.to_string(), text);
+        let (program, _) = parser::parse(&loader.sources.text, start, end, loader.next_id).map_err(|d| Ok(vec![d]))?;
+        items.extend(program.items);
+        prelude_range = Some((start, end));
+    }
     if diags.is_empty() {
-        Ok(Program { items })
+        Ok((Program { items }, prelude_range))
     } else {
         diags.sort_by_key(|d| d.span.start);
         Err(Ok(diags))

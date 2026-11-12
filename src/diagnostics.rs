@@ -175,6 +175,7 @@ pub fn explain(code: &str) -> Option<&'static str> {
         "E0400" => "An `import` names a file that does not exist or cannot be read.\n\nImport paths are relative to the file that contains the import, and the\n`.ox` extension is optional:\n\n    import \"utils\"            // ./utils.ox\n    import \"lib/geometry\"     // ./lib/geometry.ox",
         "E0401" => "A module was asked for something it does not define, or for a private\nname. After `import \"utils\"`, the functions, variables and types of\nutils.ox are used as `utils.name`. Names starting with `_` stay private to\ntheir file.",
         "E0402" => "Every import needs a distinct, valid name. By default it is the file name;\nchoose another one with `as`:\n\n    import \"lib/string-utils\" as strings",
+        "E0500" => "The native target (`--target native`) builds a real Linux executable\nwithout any other tool, but it does not support the whole language yet.\nThe same program runs on the JavaScript target with `onyx run`.",
         "E0300" => "`<-` sends to and receives from channels only.",
         _ => return None,
     })
