@@ -1,0 +1,133 @@
+//! End-to-end tests: every program in `tests/run` must print exactly its `.out`
+//! file, and every program in `tests/errors` must be rejected with the error
+//! code named on its first line (`// error: E0200`).
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const ONYX: &str = env!("CARGO_BIN_EXE_onyx");
+
+fn programs(dir: &str) -> Vec<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "ox"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no programs found in {dir}");
+    files
+}
+
+#[test]
+fn run_programs_print_expected_output() {
+    let mut failures = Vec::new();
+    for file in programs("tests/run") {
+        let expected = std::fs::read_to_string(file.with_extension("out")).unwrap();
+        let output = Command::new(ONYX).arg("run").arg(&file).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !output.status.success() || stdout != expected {
+            failures.push(format!(
+                "{}\n--- expected\n{expected}\n--- got\n{stdout}\n--- stderr\n{}",
+                file.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
+fn invalid_programs_are_rejected_with_the_right_code() {
+    let mut failures = Vec::new();
+    for file in programs("tests/errors") {
+        let src = std::fs::read_to_string(&file).unwrap();
+        let code = src.lines().next().unwrap().trim_start_matches("// error:").trim().to_string();
+        let output = Command::new(ONYX).arg("check").arg(&file).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.code() != Some(1) || !stderr.contains(&format!("error[{code}]")) {
+            failures.push(format!("{}: expected {code}, got\n{stderr}", file.display()));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
+fn examples_compile_and_their_checks_pass() {
+    for file in programs("examples") {
+        let output = Command::new(ONYX).arg("check").arg(&file).output().unwrap();
+        assert!(output.status.success(), "{}: {}", file.display(), String::from_utf8_lossy(&output.stderr));
+        let output = Command::new(ONYX).arg("test").arg(&file).output().unwrap();
+        assert!(output.status.success(), "{}: {}", file.display(), String::from_utf8_lossy(&output.stdout));
+    }
+}
+
+#[test]
+fn runtime_failures_set_the_exit_code() {
+    let dir = std::env::temp_dir().join(format!("onyx-suite-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cases = [
+        ("fn main() {\n    let xs = [1]\n    print(xs[3])\n}\n", 2, "panic: index out of bounds"),
+        ("fn main() {\n    let z = 0\n    print(1 / z)\n}\n", 2, "panic: division by zero"),
+        ("fn main() -> void! {\n    fail \"boom\"\n}\n", 1, "error: boom"),
+        ("fn main() {\n    let ch = chan<int>()\n    print(<-ch)\n}\n", 2, "deadlock"),
+        ("fn main() {\n    exit(7)\n}\n", 7, ""),
+    ];
+    for (i, (src, code, message)) in cases.iter().enumerate() {
+        let file = dir.join(format!("case{i}.ox"));
+        std::fs::write(&file, src).unwrap();
+        let output = Command::new(ONYX).arg("run").arg(&file).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(*code), "case {i}: {stderr}");
+        assert!(stderr.contains(message), "case {i}: {stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every complete program (one with a `main`) inside an ```onyx block of the
+/// README or the docs must type-check.
+#[test]
+fn documentation_examples_compile() {
+    fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                markdown_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                out.push(path);
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = vec![root.join("README.md")];
+    markdown_files(&root.join("docs"), &mut files);
+
+    let dir = std::env::temp_dir().join(format!("onyx-docs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap();
+        for (i, block) in text.split("```onyx\n").skip(1).enumerate() {
+            let code = block.split("```").next().unwrap();
+            if !code.contains("fn main(") {
+                continue;
+            }
+            let path = dir.join(format!("snippet{checked}.ox"));
+            std::fs::write(&path, code).unwrap();
+            let output = Command::new(ONYX).arg("check").arg(&path).output().unwrap();
+            if !output.status.success() {
+                failures.push(format!(
+                    "{} (onyx block #{}):\n{}",
+                    file.display(),
+                    i + 1,
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+            checked += 1;
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(checked > 10, "expected to find documentation examples, found {checked}");
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}

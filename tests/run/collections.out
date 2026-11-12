@@ -1,0 +1,27 @@
+[5, 3, 8, 1, 4] 5 5 true 2 -1
+[1, 3, 4, 5, 8] [4, 1, 8, 3, 5] [3, 8]
+[50, 7, 4, 8, 1, 4] 50 [7, 4, 8, 1, 4]
+4 7 1
+[] -1
+[3, 5, 5, 3]
+["quick", "brown"]
+["the", "fox", "quick", "brown"]
+the-quick-brown-fox
+3.5
+[[1, 2], [30, 4]] 30
+HELLO, WORLD hello, world 12
+true true true
+a+b+c 2 el ababab
+["h", "é", "l", "l", "o"] b
+h
+e
+y
+{"a": 11, "b": 2} 2 true false 11
+2 -1
+["b"] [2]
+14
+true false true true true
+false Point{x: 9, y: 2}
+2
+3
+4

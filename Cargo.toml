@@ -1,0 +1,14 @@
+[package]
+name = "onyx"
+version = "0.1.0"
+edition = "2021"
+description = "The Onyx programming language compiler"
+license = "MIT"
+repository = "https://github.com/GHugo7/onyx-lang"
+
+[[bin]]
+name = "onyx"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3

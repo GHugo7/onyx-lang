@@ -1,0 +1,15 @@
+7 9 3 -3 1 2.5
+2.0 2.5 1.5 3.0 3 -3
+4 2.5 3 7.5 4.0 1024.0
+2 3 3
+true true true true false false true
+inner 11
+outer 1
+[1, 3, 4, 5]
+7
+0.25
+abcd
+negative zero positive
+3 7 calls: 2
+3
+tab	here {braces} "quoted" nested 2
