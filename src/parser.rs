@@ -129,7 +129,8 @@ impl<'a> Parser<'a> {
                 };
                 Ok(Item::Import { path, alias, span })
             }
-            Tok::Check => {
+            // `check` is only special here, in front of a test name.
+            Tok::Ident(word) if word == "check" && matches!(self.peek_at(1), Tok::Str(_)) => {
                 self.advance();
                 let name = match self.peek().clone() {
                     Tok::Str(pieces) => {

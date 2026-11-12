@@ -17,7 +17,7 @@ onyx build --target native hello.ox
 ./build/hello
 ```
 
-A hello-world executable is about 2.3 KB: only the functions a program
+A hello-world executable is about 2.8 KB: only the functions a program
 really uses, the runtime's included, end up in it.
 
 ## Status: experimental
@@ -27,19 +27,24 @@ The native target is being built up step by step. It currently supports:
 - `int` (a real 64-bit integer), `bool`, `string`
 - structs with methods, interfaces, struct equality
 - lists: literals, indexing, `for ... in`, and the methods `len`, `push`,
-  `insert`, `remove`, `clear`, `contains`, `index_of`, `slice`, `reverse`,
-  `sort`, `join`
+  `pop`, `first`, `last`, `insert`, `remove`, `clear`, `contains`,
+  `index_of`, `slice`, `reverse`, `sort`, `join`
+- maps with `int`, `string` or `bool` keys: literals, `m[key]`,
+  `m[key] = value`, `for key in m`, and the methods `len`, `get`, `has`,
+  `remove`, `clear`, `keys`, `values`; they keep insertion order
+- error handling: functions that return `T!`, `fail`, `?`, `or`, `catch`,
+  the `error` type, and a `main` that can fail
 - functions, recursion, any number of parameters
 - top-level `var` and `const`
 - `var`, assignment, `if` / `else`, `while`, `for i in a..b`, `break`,
   `continue`, `return`
 - arithmetic, comparisons, `&&`, `||`, `!`
 - string interpolation, `+`, `+=`, comparisons and `.len()`
-- `print`, `str`, `abs`, `min`, `max`, `exit`, `panic`
+- `print`, `str`, `parse_int`, `abs`, `min`, `max`, `exit`, `panic`
 - modules (`import`)
 
-Anything else (floats, maps, lambdas, error handling, `fork`, channels, the
-other string methods, `map` / `filter` / `sort_by`) is rejected with error
+Anything else (floats, lambdas, `fork`, channels, the other string methods,
+`map` / `filter` / `sort_by`, `onyx test`) is rejected with error
 `E0500` rather than compiled incorrectly. Those programs still run on the
 default JavaScript target. Functions that are never called are not compiled,
 so an unsupported feature in unused code does not get in the way.
@@ -50,12 +55,14 @@ Known gaps in what is supported:
   message. So does dropping a chain of objects nested hundreds of thousands
   deep (a hand-made linked list, say), because they are released recursively.
 - Every list element takes 8 bytes, a `bool` included.
+- Adding or removing keys of a map inside a `for` loop over that same map
+  is not specified: the two targets may visit different keys afterwards.
 - Only Linux on x86-64 is supported.
 
 ## Memory
 
-There is no garbage collector. Every string, list and struct carries a
-reference count: the number of variables, fields and list slots that point to
+There is no garbage collector. Every string, list, map and struct carries a
+reference count: the number of variables, fields and slots that point to
 it. The compiler inserts the code that updates the count, and an object is
 freed at the exact moment its count reaches zero. Nothing has to be written
 in the program.
@@ -142,6 +149,13 @@ In the native code generator (`src/native/mod.rs`, `src/native/plan.rs`):
   last type it saw and the method it found.
 - **Lists.** Reading an element is a bounds check and a load; `push` stores
   in place when the list has room.
+- **Maps.** A hash table with open addressing over a dense array of entries:
+  a lookup usually touches one slot and one entry, and walking a map is a
+  walk over an array. Integer keys are hashed with one multiplication.
+- **Errors without exceptions.** A function that can fail returns its value
+  in one register and the error (or zero) in another, so `?` and `or` cost a
+  test and a jump. Nothing is unwound and nothing is allocated when all
+  goes well.
 
 Measurements are in [`benchmarks/`](../benchmarks/README.md).
 
@@ -152,6 +166,7 @@ last stage differs.
 
 | File | Role |
 | --- | --- |
+| `src/native/lower.rs` | Rewrites statements so that every `?` stands on its own |
 | `src/native/mod.rs` | Walks the checked program and emits machine code |
 | `src/native/plan.rs` | Chooses the variables that live in registers |
 | `src/native/asm.rs` | Encodes x86-64 instructions and resolves labels |
@@ -160,11 +175,12 @@ last stage differs.
 
 An expression leaves its value in `rax`; `rcx`, `rdx` and `r8`-`r11` are
 scratch. Arguments are pushed on the stack and the result comes back in
-`rax`. `r15` holds the address of the runtime's state, which is followed by
+`rax`. A function that can fail also sets `rdx`: zero on success, otherwise
+the error, which is simply its message string. `r15` holds the address of the runtime's state, which is followed by
 the program's top-level variables. The conventions are described at the top
 of `mod.rs`.
 
-The runtime (the memory allocator, reference counting, strings, lists,
+The runtime (the memory allocator, reference counting, strings, lists, maps,
 printing, equality) is ordinary Onyx code compiled along with every program.
 It relies on a few low-level operations that only it may use: reading and
 writing memory (`__load8`, `__store64`, ...), copying bytes (`__copy`) and
@@ -176,7 +192,9 @@ documented at the top of `runtime.ox`.
 - Every program in `tests/native` runs on both targets: the outputs must be
   identical, and the native run must release every object.
 - `tests/fuzz.rs` generates random programs and holds them to the same
-  standard. `cargo test` tries a few dozen; `ONYX_FUZZ_SEEDS=5000 cargo test
+  standard, error handling and maps included. This is also how a bug in the
+  JavaScript target was found (`?` under an `or` was caught by that `or`).
+  `cargo test` tries a few dozen; `ONYX_FUZZ_SEEDS=5000 cargo test
   --release --test fuzz` searches harder.
 - The instruction encoder is tested against the bytes that GNU `as`
   produces for the same instructions, and division by constants against
@@ -184,11 +202,10 @@ documented at the top of `runtime.ox`.
 
 ## Roadmap for this target
 
-1. Maps and the remaining string and list methods
+1. The remaining string and list methods, `for` over a string
 2. Floats
-3. Error handling (`!`, `?`, `or`, `catch`)
-4. Lambdas and closures
-5. Files, arguments, `input`
-6. `fork` and channels
-7. Weak references, to break cycles
-8. Other systems (ARM64, Windows, macOS)
+3. Lambdas and closures
+4. Files, arguments, `input`
+5. `fork` and channels
+6. Weak references, to break cycles
+7. Other systems (ARM64, Windows, macOS)

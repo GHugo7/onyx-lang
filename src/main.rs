@@ -130,7 +130,7 @@ fn compile(path: &Path, test_mode: bool, target: Target) -> Output {
         Err(Ok(diags)) => report(&diags),
         Err(Err(message)) => die(&message),
     };
-    let analysis = match checker::check(&program, &sources.text, !test_mode, runtime) {
+    let mut analysis = match checker::check(&program, &sources.text, !test_mode, runtime) {
         Ok(analysis) => analysis,
         Err(diags) => report(&diags),
     };
@@ -141,7 +141,7 @@ fn compile(path: &Path, test_mode: bool, target: Target) -> Output {
             &analysis,
             &codegen_js::Options { sources: &sources, test_mode },
         )),
-        Target::Native => match native::generate(&program, &analysis, LEAK_CHECK.load(Ordering::Relaxed)) {
+        Target::Native => match native::generate(&mut program, &mut analysis, LEAK_CHECK.load(Ordering::Relaxed)) {
             Ok(bytes) => Output::Native(bytes),
             Err(diags) => report(&diags),
         },

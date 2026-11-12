@@ -32,6 +32,7 @@
 
 mod asm;
 mod elf;
+mod lower;
 mod plan;
 
 use crate::ast::*;
@@ -66,7 +67,9 @@ const VARIABLE_REGS: [Reg; 6] = [RBX, R12, R13, R14, RSI, RDI];
 /// Key of the `self` parameter of a method (its position is the method's name).
 const SELF: u8 = 3;
 
-pub fn generate(program: &Program, an: &Analysis, leak_check: bool) -> Result<Vec<u8>, Vec<Diagnostic>> {
+pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> Result<Vec<u8>, Vec<Diagnostic>> {
+    lower::lower(program, an);
+    let (program, an) = (&*program, &*an);
     let mut g = Gen {
         an,
         asm: Asm::default(),
@@ -88,6 +91,9 @@ pub fn generate(program: &Program, an: &Analysis, leak_check: bool) -> Result<Ve
         loops: Vec::new(),
         epilogue: None,
         at_tail: false,
+        fallible: false,
+        keep_error: false,
+        rt_fallible: false,
     };
 
     // Every function gets a label. Its code is only generated when something refers to it.
@@ -150,9 +156,18 @@ pub fn generate(program: &Program, an: &Analysis, leak_check: bool) -> Result<Ve
             g.expr_into(init, Loc::Global(offset));
         }
     }
-    if g.items.contains_key("main") {
-        let main = g.function_label("main");
-        g.asm.call(main);
+    if let Some(main) = g.items.get("main") {
+        let can_fail = main.decl.fallible;
+        let label = g.function_label("main");
+        g.asm.call(label);
+        if can_fail {
+            // An error that nobody handled ends the program.
+            g.asm.test(RDX, RDX);
+            let fine = g.asm.jcc_short(Cc::E);
+            g.asm.push(RDX);
+            g.call_runtime("__rt_main_failed", 0);
+            g.asm.bind_short(fine);
+        }
     }
     if leak_check {
         for name in global_order.iter().rev() {
@@ -189,14 +204,15 @@ pub fn generate(program: &Program, an: &Analysis, leak_check: bool) -> Result<Ve
 }
 
 fn is_ref(ty: &Type) -> bool {
-    matches!(ty, Type::Str | Type::List(_) | Type::Struct(_) | Type::Interface(_))
+    matches!(ty, Type::Str | Type::Error | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Interface(_))
 }
 
 fn supported(ty: &Type) -> bool {
     match ty {
-        Type::Int | Type::Bool | Type::Str | Type::Void | Type::Range | Type::Unknown => true,
+        Type::Int | Type::Bool | Type::Str | Type::Error | Type::Void | Type::Range | Type::Unknown => true,
         Type::Struct(_) | Type::Interface(_) => true,
         Type::List(elem) => supported(elem),
+        Type::Map(key, value) => supported(key) && supported(value),
         _ => false,
     }
 }
@@ -214,7 +230,7 @@ fn plain(parts: &[StrPart]) -> Option<&str> {
 fn leaves(block: &Block) -> bool {
     matches!(
         block.stmts.last().map(|s| &s.kind),
-        Some(StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue)
+        Some(StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue | StmtKind::Fail(_))
     )
 }
 
@@ -334,6 +350,18 @@ enum Arg<'e> {
     Descriptor(Type),
 }
 
+/// Where the value of a `call() catch err { ... }` goes.
+enum Sink {
+    /// Into a variable that is being declared.
+    Var(Loc),
+    /// Into an existing variable.
+    Assign(VarRef),
+    /// Out of the function.
+    Return,
+    /// Nowhere: the expression is a statement.
+    Discard,
+}
+
 /// A piece of a string being assembled.
 enum Piece<'e> {
     Text(String),
@@ -373,6 +401,12 @@ struct Gen<'a> {
     epilogue: Option<Label>,
     /// The statement being compiled is the last one of the function body.
     at_tail: bool,
+    /// The function being compiled can fail: it reports in RDX whether it did.
+    fallible: bool,
+    /// The call whose arguments are about to be dropped can fail: RDX matters.
+    keep_error: bool,
+    /// The runtime function about to be called can fail.
+    rt_fallible: bool,
 }
 
 impl<'a> Gen<'a> {
@@ -437,6 +471,8 @@ impl<'a> Gen<'a> {
 
     /// The descriptor table of a type; it is written out by `emit_descriptors`.
     fn descriptor(&mut self, ty: &Type) -> Label {
+        // An error is its message: a string.
+        let ty = if *ty == Type::Error { &Type::Str } else { ty };
         let key = ty.to_string();
         if let Some(&label) = self.descriptors.get(&key) {
             return label;
@@ -459,6 +495,13 @@ impl<'a> Gen<'a> {
                     self.asm.bind(label);
                     self.asm.word(4);
                     self.asm.address(elem);
+                }
+                Type::Map(key, value) => {
+                    let (key, value) = (self.descriptor(key), self.descriptor(value));
+                    self.asm.bind(label);
+                    self.asm.word(7);
+                    self.asm.address(key);
+                    self.asm.address(value);
                 }
                 Type::Struct(name) => {
                     let info = self.an.structs[name].clone();
@@ -727,22 +770,30 @@ impl<'a> Gen<'a> {
 
     /// After a call: releases the arguments that were temporary values
     /// (`owned[i]` for the i-th pushed argument) and removes them all from the
-    /// stack. The result in RAX is preserved when `keep_result` is set.
+    /// stack. The result in RAX is preserved when `keep_result` is set, and
+    /// so is the error in RDX after a call that can fail (`keep_error`).
     fn drop_args(&mut self, owned: &[bool], keep_result: bool) {
+        let keep_error = std::mem::take(&mut self.keep_error);
         let n = owned.len() as i32;
         if n == 0 {
             return;
         }
         if owned.iter().any(|&o| o) {
-            let base = if keep_result {
+            let mut base = 0;
+            if keep_result {
                 self.asm.push(RAX);
-                8
-            } else {
-                0
-            };
+                base += 8;
+            }
+            if keep_error {
+                self.asm.push(RDX);
+                base += 8;
+            }
             for (i, _) in owned.iter().enumerate().filter(|(_, &o)| o) {
                 self.asm.load(RAX, RSP, base + 8 * (n - 1 - i as i32));
                 self.release_rax();
+            }
+            if keep_error {
+                self.asm.pop(RDX);
             }
             if keep_result {
                 self.asm.pop(RAX);
@@ -762,9 +813,7 @@ impl<'a> Gen<'a> {
             self.check_type(&p.ty, p.span);
         }
         self.check_type(&ret, decl.ret.as_ref().map(|t| t.span).unwrap_or(decl.name_span));
-        if decl.fallible {
-            self.unsupported(decl.name_span, "functions that can fail (`!`)");
-        }
+        self.fallible = decl.fallible;
 
         let names: Vec<(String, VarKey)> = params.iter().map(|p| (p.name.clone(), p.key)).collect();
         let plan = plan::plan(&decl.body, &names, &VARIABLE_REGS);
@@ -827,6 +876,9 @@ impl<'a> Gen<'a> {
         if !leaves(&decl.body) {
             self.release_scopes(0);
         }
+        if decl.fallible {
+            self.asm.mov_imm(RDX, 0); // reaching the end means success
+        }
 
         self.asm.bind(epilogue);
         for (k, &r) in saved.iter().enumerate() {
@@ -856,6 +908,14 @@ impl<'a> Gen<'a> {
     fn stmt(&mut self, stmt: &Stmt) {
         let tail = std::mem::replace(&mut self.at_tail, false);
         match &stmt.kind {
+            StmtKind::Let { name, name_span, init, .. } if matches!(init.kind, ExprKind::Catch { .. }) => {
+                // The variable only exists once one of the two paths gave it a value.
+                let ty = self.ty(init);
+                let loc = self.home((name_span.start, NAMED));
+                self.catch(init, Sink::Var(loc));
+                let reference = is_ref(&ty);
+                self.scopes.last_mut().unwrap().push(Var { name: name.clone(), loc, is_ref: reference, owned: reference });
+            }
             StmtKind::Let { name, name_span, init, .. } => {
                 let ty = self.ty(init);
                 if is_ref(&ty) {
@@ -870,7 +930,18 @@ impl<'a> Gen<'a> {
                     self.scopes.last_mut().unwrap().push(Var { name: name.clone(), loc, is_ref: false, owned: false });
                 }
             }
+            StmtKind::Assign { target, value, .. } if matches!(value.kind, ExprKind::Catch { .. }) => {
+                // After lowering, the target of such an assignment is a plain variable.
+                match &target.kind {
+                    ExprKind::Ident(name) => match self.lookup(name) {
+                        Some(var) => self.catch(value, Sink::Assign(var)),
+                        None => self.unsupported(target.span, "assignments to this name"),
+                    },
+                    _ => self.unsupported(target.span, "this use of `catch`"),
+                }
+            }
             StmtKind::Assign { target, op, value } => self.assign(target, *op, value),
+            StmtKind::Expr(e) if matches!(e.kind, ExprKind::Catch { .. }) => self.catch(e, Sink::Discard),
             StmtKind::Expr(e) => {
                 self.expr(e);
                 if is_ref(&self.ty(e)) {
@@ -917,8 +988,10 @@ impl<'a> Gen<'a> {
             StmtKind::For { var, var_span, iter, body } => match self.ty(iter) {
                 Type::Range => self.for_range(var, *var_span, iter, body),
                 Type::List(elem) => self.for_list(var, *var_span, iter, body, &elem),
-                _ => self.unsupported(iter.span, "loops over strings, maps and channels"),
+                Type::Map(key, _) => self.for_map(var, *var_span, iter, body, &key),
+                _ => self.unsupported(iter.span, "loops over strings and channels"),
             },
+            StmtKind::Return(Some(v)) if matches!(v.kind, ExprKind::Catch { .. }) => self.catch(v, Sink::Return),
             StmtKind::Return(value) => {
                 // Returning an owned local variable hands its reference over
                 // to the caller instead of making a new one and dropping the old.
@@ -932,23 +1005,19 @@ impl<'a> Gen<'a> {
                         _ => self.expr(v),
                     }
                 }
-                let pending = self.owned_refs(0, moved);
-                if !pending.is_empty() {
-                    if value.is_some() {
-                        self.asm.push(RAX);
+                self.finish_return(value.is_some(), moved, tail);
+            }
+            StmtKind::Fail(value) => {
+                // The error (a string) goes to the caller in RDX.
+                let mut moved = None;
+                match self.local(value) {
+                    Some(var) if var.is_ref && var.owned => {
+                        self.load_loc(RAX, var.loc);
+                        moved = Some(var.loc);
                     }
-                    for loc in pending {
-                        self.load_loc(RAX, loc);
-                        self.release_rax();
-                    }
-                    if value.is_some() {
-                        self.asm.pop(RAX);
-                    }
+                    _ => self.expr(value),
                 }
-                if !tail {
-                    let epilogue = self.epilogue.unwrap();
-                    self.asm.jmp(epilogue);
-                }
+                self.leave_with_error(RAX, moved);
             }
             StmtKind::Break => {
                 let (from, end) = self.loops.last().map(|l| (l.break_from, l.end)).unwrap();
@@ -961,9 +1030,126 @@ impl<'a> Gen<'a> {
                 self.asm.jmp(next);
             }
             StmtKind::Block(body) => self.block(body),
-            StmtKind::Fail(_) => self.unsupported(stmt.span, "`fail` statements"),
             StmtKind::Fork(_) => self.unsupported(stmt.span, "`fork` blocks"),
             StmtKind::Send { .. } => self.unsupported(stmt.span, "channels"),
+        }
+    }
+
+    /// Ends the function normally. The returned value, if any, is in RAX;
+    /// `moved` is the variable it was taken from (and that must not be released).
+    fn finish_return(&mut self, has_value: bool, moved: Option<Loc>, tail: bool) {
+        let pending = self.owned_refs(0, moved);
+        if !pending.is_empty() {
+            if has_value {
+                self.asm.push(RAX);
+            }
+            for loc in pending {
+                self.load_loc(RAX, loc);
+                self.release_rax();
+            }
+            if has_value {
+                self.asm.pop(RAX);
+            }
+        }
+        // The last statement of a function simply reaches its end.
+        if !tail {
+            if self.fallible {
+                self.asm.mov_imm(RDX, 0);
+            }
+            let epilogue = self.epilogue.unwrap();
+            self.asm.jmp(epilogue);
+        }
+    }
+
+    /// Ends the function with the error held in `error` (RAX or RDX).
+    fn leave_with_error(&mut self, error: Reg, moved: Option<Loc>) {
+        let pending = self.owned_refs(0, moved);
+        if !pending.is_empty() {
+            self.asm.push(error);
+            for loc in pending {
+                self.load_loc(RAX, loc);
+                self.release_rax();
+            }
+            self.asm.pop(RDX);
+        } else {
+            self.asm.mov(RDX, error);
+        }
+        let epilogue = self.epilogue.unwrap();
+        self.asm.jmp(epilogue);
+    }
+
+    /// `call() catch err { ... }`: the call's value goes to `sink`; if the
+    /// call fails, the block runs with the error, and may provide a value
+    /// instead (its last expression) or leave.
+    fn catch(&mut self, e: &Expr, sink: Sink) {
+        let ExprKind::Catch { expr: call, name, name_span, body } = &e.kind else { return };
+        let ty = self.ty(e);
+        let has_value = self.an.catch_values.contains(&e.id);
+        let (handler, done) = (self.asm.new_label(), self.asm.new_label());
+        self.expr(call);
+        self.asm.test(RDX, RDX);
+        self.asm.jcc(Cc::Ne, handler);
+        self.sink(&sink, &ty);
+        if !matches!(sink, Sink::Return) {
+            self.asm.jmp(done);
+        }
+
+        self.asm.bind(handler);
+        self.scopes.push(Vec::new());
+        let error = self.declare(name, (name_span.start, NAMED), &Type::Error);
+        self.store_loc(error, RDX);
+        let scope = self.scopes.len() - 1;
+        let (value, rest) = match body.stmts.split_last() {
+            Some((Stmt { kind: StmtKind::Expr(last), .. }, rest)) if has_value => (Some(last), rest),
+            _ => (None, &body.stmts[..]),
+        };
+        for stmt in rest {
+            self.stmt(stmt);
+        }
+        match value {
+            Some(value) => {
+                // The block's last expression stands in for the call's value.
+                self.expr(value);
+                self.asm.push(RAX);
+                self.release_scopes(scope);
+                self.asm.pop(RAX);
+                self.scopes.pop();
+                self.sink(&sink, &ty);
+            }
+            None => {
+                if !leaves(body) {
+                    self.release_scopes(scope);
+                }
+                self.scopes.pop();
+                // `return call() catch err { ... }` with nothing to return.
+                if matches!(sink, Sink::Return) && !leaves(body) {
+                    self.finish_return(false, None, false);
+                }
+            }
+        }
+        self.asm.bind(done);
+    }
+
+    /// Sends the value in RAX where a `catch` expression's value goes.
+    fn sink(&mut self, sink: &Sink, ty: &Type) {
+        match sink {
+            Sink::Var(loc) => self.store_loc(*loc, RAX),
+            Sink::Assign(var) => {
+                if var.is_ref {
+                    self.load_loc(RCX, var.loc);
+                    self.store_loc(var.loc, RAX);
+                    self.asm.mov(RAX, RCX);
+                    self.release_rax();
+                } else {
+                    self.store_loc(var.loc, RAX);
+                }
+            }
+            Sink::Return => self.finish_return(*ty != Type::Void, None, false),
+            Sink::Discard => {
+                if is_ref(ty) {
+                    self.release_rax();
+                }
+            }
         }
     }
 
@@ -1178,6 +1364,9 @@ impl<'a> Gen<'a> {
             },
             ExprKind::Index { obj, index } if matches!(self.ty(obj), Type::List(_)) => {
                 self.assign_element(obj, index, &ty, bin, value)
+            }
+            ExprKind::Index { obj, index } if matches!(self.ty(obj), Type::Map(..)) => {
+                self.assign_entry(obj, index, &ty, bin, value)
             }
             _ => self.unsupported(target.span, "assignments to this kind of expression"),
         }
@@ -1575,6 +1764,8 @@ impl<'a> Gen<'a> {
                 }
             }
             ExprKind::Call { callee, args } => self.call(e, callee, args),
+            // An error is its message.
+            ExprKind::Field { obj, .. } if self.ty(obj) == Type::Error => self.expr(obj),
             ExprKind::Field { obj, name, .. } => {
                 let Some(offset) = self.field_offset(obj, name) else {
                     self.unsupported(e.span, "fields of this type");
@@ -1600,9 +1791,13 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
+            ExprKind::Index { obj, index } if matches!(self.ty(obj), Type::Map(..)) => {
+                let key = self.key_arg(index);
+                self.call_rt("__rt_map_at", &[Arg::Borrow(obj), key], true);
+            }
             ExprKind::Index { obj, index } => {
                 if !matches!(self.ty(obj), Type::List(_)) {
-                    self.unsupported(e.span, "indexing into maps and strings");
+                    self.unsupported(e.span, "indexing into strings");
                     return;
                 }
                 if self.is_place(e) {
@@ -1627,11 +1822,48 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
-            ExprKind::Try(_) | ExprKind::Or { .. } | ExprKind::Catch { .. } => {
-                self.unsupported(e.span, "`?`, `or` and `catch`")
+            ExprKind::Try(call) => {
+                // On failure the error goes straight to this function's caller.
+                // The lowering pass made sure nothing else is pending here.
+                self.expr(call);
+                let fine = self.asm.new_label();
+                self.asm.test(RDX, RDX);
+                self.asm.jcc(Cc::E, fine);
+                self.leave_with_error(RDX, None);
+                self.asm.bind(fine);
             }
+            ExprKind::Or { expr: call, default } => {
+                self.expr(call);
+                let fine = self.asm.new_label();
+                self.asm.test(RDX, RDX);
+                self.asm.jcc(Cc::E, fine);
+                self.asm.mov(RAX, RDX);
+                self.release_rax();
+                self.expr(default);
+                self.asm.bind(fine);
+            }
+            ExprKind::Catch { .. } => self.unsupported(e.span, "this use of `catch`"),
             ExprKind::Range { .. } => self.unsupported(e.span, "ranges outside of a `for` loop"),
-            ExprKind::Map(_) => self.unsupported(e.span, "maps"),
+            ExprKind::Map(entries) => {
+                let td = self.descriptor(&ty);
+                self.asm.lea(RAX, td);
+                self.asm.push(RAX);
+                self.call_runtime("__rt_map_new", 1);
+                if entries.is_empty() {
+                    return;
+                }
+                self.asm.push(RAX);
+                for (key, value) in entries {
+                    self.asm.load(RAX, RSP, 0);
+                    self.asm.push(RAX);
+                    let key_owned = self.push_arg(key);
+                    self.expr(value);
+                    self.asm.push(RAX);
+                    self.call_runtime("__rt_map_set", 0);
+                    self.drop_args(&[false, key_owned, false], false);
+                }
+                self.asm.pop(RAX);
+            }
             ExprKind::Lambda { .. } => self.unsupported(e.span, "lambdas"),
             ExprKind::Recv(_) | ExprKind::ChanNew { .. } => self.unsupported(e.span, "channels"),
             ExprKind::Float(_) => self.unsupported(e.span, "floats"),
@@ -1776,7 +2008,7 @@ impl<'a> Gen<'a> {
     fn to_str(&mut self, e: &Expr) -> bool {
         let ty = self.ty(e);
         match ty {
-            Type::Str => {
+            Type::Str | Type::Error => {
                 self.expr(e);
                 true
             }
@@ -1827,7 +2059,7 @@ impl<'a> Gen<'a> {
                     self.asm.lea(RAX, label);
                     false
                 }
-                Piece::Expr(e) if self.ty(e) == Type::Str => {
+                Piece::Expr(e) if matches!(self.ty(e), Type::Str | Type::Error) => {
                     if pure {
                         self.operand_now(e)
                     } else {
@@ -2107,7 +2339,14 @@ impl<'a> Gen<'a> {
     /// Calls a runtime function. The runtime never runs code of the program,
     /// so when the arguments do not either, references can be borrowed from
     /// wherever they are stored.
+    /// Like `call_rt`, for a runtime function that can fail.
+    fn call_rt_fallible(&mut self, name: &str, args: &[Arg], has_result: bool) {
+        self.rt_fallible = true;
+        self.call_rt(name, args, has_result);
+    }
+
     fn call_rt(&mut self, name: &str, args: &[Arg], has_result: bool) {
+        let fallible = std::mem::take(&mut self.rt_fallible);
         let pure = args.iter().all(|arg| match arg {
             Arg::Borrow(e) | Arg::Move(e) | Arg::Value(e) => self.is_pure(e),
             _ => true,
@@ -2142,16 +2381,19 @@ impl<'a> Gen<'a> {
             });
         }
         self.call_runtime(name, 0);
+        self.keep_error = fallible;
         self.drop_args(&owned, has_result);
     }
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr]) {
         let has_result = self.ty(e) != Type::Void;
+        let fallible = self.an.fallible_calls.contains(&e.id);
         match self.call_kind(e).cloned() {
             Some(CallKind::Fn(name)) => {
                 let owned: Vec<bool> = args.iter().map(|a| self.push_arg(a)).collect();
                 let label = self.function_label(&name);
                 self.asm.call(label);
+                self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
             }
             Some(CallKind::Method(strukt, name)) => {
@@ -2161,6 +2403,7 @@ impl<'a> Gen<'a> {
                 owned.extend(args.iter().map(|a| self.push_arg(a)));
                 let label = self.function_label(&method_key(&strukt, &name));
                 self.asm.call(label);
+                self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
             }
             Some(CallKind::Dynamic) => {
@@ -2175,6 +2418,7 @@ impl<'a> Gen<'a> {
                 let mut owned = vec![self.push_arg(obj)];
                 owned.extend(args.iter().map(|a| self.push_arg(a)));
                 self.interface_call(name, args.len());
+                self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
             }
             Some(CallKind::Builtin(name)) => self.builtin(&name, e, args),
@@ -2185,6 +2429,10 @@ impl<'a> Gen<'a> {
             Some(CallKind::BuiltinMethod(Recv::List, name)) => {
                 let ExprKind::Field { obj, .. } = &callee.kind else { return };
                 self.list_method(e, obj, &name, args);
+            }
+            Some(CallKind::BuiltinMethod(Recv::Map, name)) => {
+                let ExprKind::Field { obj, .. } = &callee.kind else { return };
+                self.map_method(e, obj, &name, args);
             }
             Some(CallKind::BuiltinMethod(_, name)) => {
                 self.unsupported(e.span, &format!("calls to the method `{name}`"));
@@ -2216,6 +2464,141 @@ impl<'a> Gen<'a> {
         self.asm.store(R15, cache + 8, RAX);
         self.asm.call_reg(RAX);
         self.asm.bind_short(done);
+    }
+
+    /// A map key as an argument for the runtime: strings are lent, the rest is a plain value.
+    fn key_arg<'e>(&self, key: &'e Expr) -> Arg<'e> {
+        if is_ref(&self.ty(key)) {
+            Arg::Borrow(key)
+        } else {
+            Arg::Value(key)
+        }
+    }
+
+    fn map_method(&mut self, e: &Expr, obj: &Expr, name: &str, args: &[Expr]) {
+        let Type::Map(key_ty, value_ty) = self.ty(obj) else { return };
+        match name {
+            "len" => {
+                let owned = self.operand(obj);
+                if owned {
+                    self.asm.push(RAX);
+                }
+                self.asm.load(RAX, RAX, 8);
+                if owned {
+                    self.release_saved();
+                }
+            }
+            "get" => {
+                let key = self.key_arg(&args[0]);
+                self.call_rt_fallible("__rt_map_get", &[Arg::Borrow(obj), key], true);
+            }
+            "has" => {
+                let key = self.key_arg(&args[0]);
+                self.call_rt("__rt_map_has", &[Arg::Borrow(obj), key], true);
+            }
+            "remove" => {
+                let key = self.key_arg(&args[0]);
+                self.call_rt("__rt_map_remove", &[Arg::Borrow(obj), key], false);
+            }
+            "clear" => self.call_rt("__rt_map_clear", &[Arg::Borrow(obj)], false),
+            "keys" => {
+                let list = Arg::Descriptor(Type::List(key_ty));
+                self.call_rt("__rt_map_list", &[Arg::Borrow(obj), list, Arg::Const(8)], true);
+            }
+            "values" => {
+                let list = Arg::Descriptor(Type::List(value_ty));
+                self.call_rt("__rt_map_list", &[Arg::Borrow(obj), list, Arg::Const(16)], true);
+            }
+            _ => self.unsupported(e.span, &format!("calls to the map method `{name}`")),
+        }
+    }
+
+    /// `map[key] = value` and `map[key] op= value`.
+    fn assign_entry(&mut self, obj: &Expr, key: &Expr, ty: &Type, bin: Option<BinOp>, value: &Expr) {
+        let Some(op) = bin else {
+            let key = self.key_arg(key);
+            let value = if is_ref(ty) { Arg::Move(value) } else { Arg::Value(value) };
+            self.call_rt("__rt_map_set", &[Arg::Borrow(obj), key, value], false);
+            return;
+        };
+        // The map and the key wait on the stack while the new value is computed.
+        let map_owned = self.operand(obj);
+        self.asm.push(RAX);
+        let key_owned = self.push_arg(key);
+        self.asm.load(RAX, RSP, 8);
+        self.asm.push(RAX);
+        self.asm.load(RAX, RSP, 8);
+        self.asm.push(RAX);
+        self.call_runtime("__rt_map_at", 2);
+        if *ty == Type::Str {
+            self.asm.push(RAX);
+            let piece_owned = self.operand(value);
+            self.asm.push(RAX);
+            self.call_runtime("__rt_concat", 0);
+            self.drop_args(&[true, piece_owned], true);
+        } else {
+            self.asm.push(RAX);
+            self.expr(value);
+            self.asm.mov(RCX, RAX);
+            self.asm.pop(RAX);
+            self.arith_rcx(op);
+        }
+        self.asm.push(RAX);
+        self.call_runtime("__rt_map_set", 1);
+        self.drop_args(&[map_owned, key_owned], false);
+    }
+
+    /// `for key in map`: the keys, in the order they were added.
+    fn for_map(&mut self, var: &str, var_span: Span, iter: &Expr, body: &Block, key: &Type) {
+        let (top, next, end) = (self.asm.new_label(), self.asm.new_label(), self.asm.new_label());
+        // Outer scope: the map (kept alive for the whole loop) and the entry number.
+        self.scopes.push(Vec::new());
+        self.expr(iter);
+        let map = self.declare("<map>", (var_span.start, SUBJECT), &self.ty(iter));
+        self.store_loc(map, RAX);
+        let position = self.home((var_span.start, COUNTER));
+        self.asm.mov_imm(RAX, 0);
+        self.store_loc(position, RAX);
+
+        self.asm.bind(top);
+        // Removed entries are skipped; the search starts where the last turn stopped.
+        self.load_loc(RAX, map);
+        self.asm.push(RAX);
+        self.load_loc(RAX, position);
+        self.asm.push(RAX);
+        self.call_runtime("__rt_map_next", 2);
+        self.asm.alu_imm(Alu::Cmp, RAX, 0);
+        self.asm.jcc(Cc::L, end);
+        self.store_loc(position, RAX);
+        self.load_loc(RCX, map);
+        self.asm.push(RCX);
+        self.asm.push(RAX);
+        self.asm.push_imm(8);
+        self.call_runtime("__rt_map_part", 3);
+
+        // Inner scope: the loop variable, released after each turn.
+        self.scopes.push(Vec::new());
+        if is_ref(key) {
+            self.retain(RAX);
+        }
+        let item = self.declare(var, (var_span.start, NAMED), key);
+        self.store_loc(item, RAX);
+        let depth = self.scopes.len();
+        self.loops.push(Loop { next, end, continue_from: depth, break_from: depth - 1 });
+        self.block(body);
+        self.loops.pop();
+
+        self.asm.bind(next);
+        self.release_scopes(depth - 1);
+        self.scopes.pop();
+        self.load_loc(RAX, position);
+        self.asm.alu_imm(Alu::Add, RAX, 1);
+        self.store_loc(position, RAX);
+        self.asm.jmp(top);
+
+        self.asm.bind(end);
+        self.release_scopes(self.scopes.len() - 1);
+        self.scopes.pop();
     }
 
     fn list_method(&mut self, e: &Expr, obj: &Expr, name: &str, args: &[Expr]) {
@@ -2277,6 +2660,9 @@ impl<'a> Gen<'a> {
                 self.call_rt("__rt_list_insert", &[Arg::Borrow(obj), Arg::Value(&args[0]), make(kind, &args[1])], false);
             }
             "remove" => self.call_rt("__rt_list_remove", &[Arg::Borrow(obj), Arg::Value(&args[0])], true),
+            "pop" => self.call_rt_fallible("__rt_list_pop", &[Arg::Borrow(obj)], true),
+            "first" => self.call_rt_fallible("__rt_list_first", &[Arg::Borrow(obj)], true),
+            "last" => self.call_rt_fallible("__rt_list_last", &[Arg::Borrow(obj)], true),
             "clear" => self.call_rt("__rt_list_clear", &[Arg::Borrow(obj)], false),
             "contains" | "index_of" => {
                 let kind = element(self, &args[0], false);
@@ -2334,6 +2720,7 @@ impl<'a> Gen<'a> {
                     self.to_str(&args[0]);
                 }
             }
+            "parse_int" => self.call_rt_fallible("__rt_parse_int", &[Arg::Borrow(&args[0])], true),
             "exit" => self.call_rt("__rt_exit", &[Arg::Value(&args[0])], false),
             "panic" => self.call_rt("__rt_panic", &[Arg::Borrow(&args[0])], false),
             "abs" => {

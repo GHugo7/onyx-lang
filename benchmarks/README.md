@@ -22,16 +22,17 @@ Numbers move by a few percent from run to run.
 
 | Program | What it stresses | Native | Node | Native executable |
 | --- | --- | ---: | ---: | ---: |
-| `alloc` | 9 million short-lived objects | 144 ms | 127 ms | 5.5 KB |
-| `collatz` | branches, division, multiplication | 390 ms | 1540 ms | 3.2 KB |
-| `fib` | 39 million recursive calls | 290 ms | 400 ms | 3.0 KB |
-| `loops` | nested loops, `%` by a constant | 237 ms | 300 ms | 3.0 KB |
-| `print` | 500 000 lines of output | 18 ms | 600 ms | 3.0 KB |
-| `shapes` | 5 million calls through an interface | 25 ms | 460 ms | 5.1 KB |
-| `sieve` | list reads and writes | 103 ms | 250 ms | 5.4 KB |
-| `sort` | sorting a million integers | 172 ms | 560 ms | 7.1 KB |
-| `strings` | building a long string, comparing | 16 ms | 45 ms | 5.6 KB |
-| `structs` | 5 million method calls on structs | 15 ms | 48 ms | 5.0 KB |
+| `alloc` | 9 million short-lived objects | 153 ms | 177 ms | 5.9 KB |
+| `collatz` | branches, division, multiplication | 372 ms | 1583 ms | 3.6 KB |
+| `fib` | 39 million recursive calls | 296 ms | 385 ms | 3.4 KB |
+| `loops` | nested loops, `%` by a constant | 198 ms | 330 ms | 3.5 KB |
+| `maps` | a million insertions, two million lookups | 223 ms | 434 ms | 11.2 KB |
+| `print` | 500 000 lines of output | 19 ms | 533 ms | 3.4 KB |
+| `shapes` | 5 million calls through an interface | 22 ms | 474 ms | 5.6 KB |
+| `sieve` | list reads and writes | 124 ms | 312 ms | 5.8 KB |
+| `sort` | sorting a million integers | 173 ms | 659 ms | 7.6 KB |
+| `strings` | building a long string, comparing | 18 ms | 64 ms | 6.1 KB |
+| `structs` | 5 million method calls on structs | 19 ms | 60 ms | 5.4 KB |
 
 Peak memory of the same runs:
 
@@ -39,6 +40,7 @@ Peak memory of the same runs:
 | --- | ---: | ---: |
 | `alloc` | 32 KB | 66 MB |
 | `fib` | 20 KB | 48 MB |
+| `maps` | 23 MB | 115 MB |
 | `sieve` | 65 MB | 204 MB |
 | `sort` | 23 MB | 137 MB |
 | `strings` | 264 KB | 54 MB |
@@ -49,8 +51,8 @@ Things to keep in mind when reading these:
 - Node.js spends about 40 ms starting up; that is part of its numbers.
 - `shapes` is slow on JavaScript because of how Onyx compiles calls through
   an interface there (each one is awaited), not because of Node.js itself.
-- `alloc` is the one program where Node.js is ahead: its engine can avoid
-  creating objects that never leave a loop.
+- `alloc` is the closest of them: the JavaScript engine can avoid creating
+  objects that never leave a loop.
 
 ## History
 
@@ -70,4 +72,5 @@ described in [`docs/native.md`](../docs/native.md):
 | `strings` | 5280 ms | 16 ms |
 | `structs` | 57 ms | 15 ms |
 
-Executables went from about 20 KB to between 3 and 7 KB.
+Executables went from about 20 KB to between 3 and 7 KB. (The "after" column
+is the measurement made at the time; the table above is more recent.)

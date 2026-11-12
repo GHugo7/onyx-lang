@@ -125,6 +125,22 @@ fn fact(n: int) -> int {
     return n * fact(n - 1) % 1000003
 }
 
+fn half(n: int) -> int! {
+    if n % 2 != 0 {
+        fail "{n} is odd"
+    }
+    return n / 2
+}
+
+fn pos_label(n: int) -> string! {
+    if n < 0 {
+        fail "negative"
+    }
+    return "n{n % 1000}"
+}
+
+var g_ages: map<string, int> = {"a": 1}
+var g_ids: map<int, string> = {}
 var g_count = 0
 var g_text = "g"
 var g_list: [int] = [3, 1, 2]
@@ -206,6 +222,8 @@ struct Function {
     name: String,
     params: Vec<Ty>,
     ret: Option<Ty>,
+    /// Declared with `!`: every call has to say what happens on failure.
+    fallible: bool,
 }
 
 struct Gen {
@@ -225,6 +243,10 @@ struct Gen {
     /// While set, expressions do not call generated functions (which could
     /// change a list between the moment its length is checked and its use).
     calm: bool,
+    /// The function being generated can fail, so `?` and `fail` are allowed.
+    can_try: bool,
+    /// Inside a loop over a map, which must not change meanwhile.
+    frozen_maps: bool,
 }
 
 const TEXTS: &[&str] = &[
@@ -357,7 +379,7 @@ impl Gen {
     }
 
     fn int(&mut self, depth: u32) -> (String, u64) {
-        let choice = if depth == 0 { self.rng.below(4) } else { self.rng.below(23) };
+        let choice = if depth == 0 { self.rng.below(4) } else { self.rng.below(27) };
         let (e, size) = match choice {
             0 | 1 => self.literal(),
             2 | 3 => match self.some_var(Ty::Int) {
@@ -463,6 +485,23 @@ impl Gen {
                 let n = self.bounded_int(depth - 1);
                 (format!("fact(abs({n}) % 12)"), 1_000_003)
             }
+            22 | 23 => {
+                // Something that can fail, handled on the spot or passed on.
+                let fallback = self.rng.between(-50, 50);
+                let (call, size) = match self.rng.below(6) {
+                    0 | 1 => (format!("half({})", self.bounded_int(depth - 1)), INT_LIMIT),
+                    2 => (format!("g_ages.get({})", self.short_string().0), 1 << 40),
+                    3 => (format!("{}.first()", self.ints(depth - 1).0), 1 << 40),
+                    4 => (format!("{}.last()", self.ints(depth - 1).0), 1 << 40),
+                    _ => (format!("parse_int({})", self.short_string().0), INT_LIMIT),
+                };
+                if self.can_try && self.rng.chance(50) {
+                    (format!("{call}?"), size)
+                } else {
+                    (format!("({call} or {fallback})"), size)
+                }
+            }
+            24 => (self.rng.pick(&["g_ages.len()", "g_ids.len()"]).to_string(), 1 << 24),
             _ => match self.call(Ty::Int) {
                 Some(call) => (call, INT_LIMIT),
                 None => self.literal(),
@@ -474,7 +513,7 @@ impl Gen {
     // ---- booleans ----
 
     fn boolean(&mut self, depth: u32) -> String {
-        let choice = if depth == 0 { self.rng.below(3) } else { self.rng.below(14) };
+        let choice = if depth == 0 { self.rng.below(3) } else { self.rng.below(15) };
         match choice {
             0 => self.rng.pick(&["true", "false"]).to_string(),
             1 | 2 => match self.some_var(Ty::Bool) {
@@ -507,6 +546,11 @@ impl Gen {
                     format!("{ss}.contains({s})")
                 }
             }
+            13 => match self.rng.below(3) {
+                0 => format!("g_ages.has({})", self.short_string().0),
+                1 => format!("g_ids.has({})", self.bounded_int(depth - 1)),
+                _ => format!("(g_ids.len() {} {})", self.rng.pick(&["<", ">=", "=="]), self.rng.between(0, 5)),
+            },
             12 => {
                 let op = self.rng.pick(&["==", "!="]);
                 match self.rng.below(4) {
@@ -592,7 +636,7 @@ impl Gen {
     }
 
     fn string(&mut self, depth: u32) -> (String, u64) {
-        let choice = if depth == 0 { self.rng.below(4) } else { self.rng.below(15) };
+        let choice = if depth == 0 { self.rng.below(4) } else { self.rng.below(16) };
         match choice {
             0 | 1 => {
                 let text = self.rng.pick(TEXTS);
@@ -636,6 +680,18 @@ impl Gen {
                 1 => ("team.name".to_string(), GROWING),
                 _ => ("g_point.name".to_string(), GROWING),
             },
+            14 => {
+                let call = if self.rng.chance(60) {
+                    format!("pos_label({})", self.bounded_int(depth - 1))
+                } else {
+                    format!("g_ids.get({})", self.bounded_int(depth - 1))
+                };
+                if self.can_try && self.rng.chance(50) {
+                    (format!("{call}?"), GROWING)
+                } else {
+                    (format!("({call} or {})", self.rng.pick(TEXTS)), GROWING)
+                }
+            }
             _ => match self.call(Ty::Str) {
                 Some(call) => (call, GROWING),
                 None => self.short_string(),
@@ -812,7 +868,17 @@ impl Gen {
             return None;
         }
         let index = candidates[self.rng.below(candidates.len())];
-        Some(self.call_text(index))
+        let call = self.call_text(index);
+        if !self.functions[index].fallible {
+            return Some(call);
+        }
+        Some(if self.can_try && self.rng.chance(50) {
+            format!("{call}?")
+        } else if ty == Ty::Int {
+            format!("({call} or {})", self.rng.between(-9, 9))
+        } else {
+            format!("({call} or {})", self.rng.pick(TEXTS))
+        })
     }
 
     fn call_text(&mut self, index: usize) -> String {
@@ -846,7 +912,9 @@ impl Gen {
 
     fn stmt(&mut self) {
         self.budget -= 1;
-        match self.rng.below(26) {
+        match self.rng.below(31) {
+            26 | 27 => self.catch_stmt(),
+            28..=30 => self.map_op(),
             0..=4 => self.declare(),
             5..=7 => self.assign_int(),
             8 => self.assign_other(),
@@ -1338,12 +1406,255 @@ impl Gen {
         }
     }
 
+    /// What a `catch` block does before giving a value or leaving.
+    fn catch_body(&mut self) -> String {
+        match self.rng.below(4) {
+            0 => "print(\"caught\", err)".to_string(),
+            1 => "g_count = (g_count + err.message.len()) % 1000".to_string(),
+            2 => "g_text += \"!\"".to_string(),
+            _ => "var note = \"<\" + err.message + \">\"".to_string(),
+        }
+    }
+
+    /// A way for a `catch` block to leave instead of giving a value.
+    fn catch_exit(&mut self) -> Option<String> {
+        if self.loops > 0 && self.rng.chance(60) {
+            return Some(self.rng.pick(&["continue", "break"]).to_string());
+        }
+        match self.returns {
+            Some(Some(ty)) => Some(format!("return {}", self.calmly(|g| g.expr(ty, 1)))),
+            Some(None) => Some("return".to_string()),
+            None => None,
+        }
+    }
+
+    fn catch_stmt(&mut self) {
+        let fallback = self.rng.between(-9, 9);
+        let call = match self.rng.below(4) {
+            0 | 1 => format!("half({})", self.bounded_int(2)),
+            2 => format!("g_ages.get({})", self.short_string().0),
+            _ => format!("parse_int({})", self.short_string().0),
+        };
+        let body = self.catch_body();
+        match self.rng.below(7) {
+            0 | 1 => {
+                // The block gives a value, or leaves.
+                let name = self.fresh("c");
+                self.line(&format!("var {name} = {call} catch err {{"));
+                self.line(&format!("    {body}"));
+                match self.catch_exit() {
+                    Some(exit) if self.rng.chance(40) => self.line(&format!("    {exit}")),
+                    _ => self.line(&format!("    {fallback}")),
+                }
+                self.line("}");
+                self.line(&format!("{name} = {name} % 1000003"));
+                self.add_var(&name, Ty::Int, INT_LIMIT);
+            }
+            2 => match self.assignable_var(Ty::Int) {
+                Some(var) => {
+                    self.line(&format!("{} = {call} catch err {{", var.name));
+                    self.line(&format!("    {body}"));
+                    self.line(&format!("    {fallback}"));
+                    self.line("}");
+                    self.line(&format!("{0} = {0} % 1000003", var.name));
+                }
+                None => self.print(),
+            },
+            3 => {
+                self.line(&format!("{call} catch err {{"));
+                self.line(&format!("    {body}"));
+                self.line("}");
+            }
+            4 => {
+                // Into an element or a field: the target is prepared first.
+                let k = self.rng.between(0, 3);
+                let op = self.rng.pick(&["=", "+=", "-="]);
+                let value = format!("half({}) catch err {{ {fallback} }}", self.calmly(|g| g.bounded_int(1)));
+                match self.rng.below(3) {
+                    0 => {
+                        self.line(&format!("if g_list.len() > {k} {{"));
+                        self.line(&format!("    g_list[{k}] {op} {value}"));
+                        self.line(&format!("    g_list[{k}] = g_list[{k}] % 1000003"));
+                        self.line("}");
+                    }
+                    1 => {
+                        self.line(&format!("g_point.x {op} {value}"));
+                        self.line("g_point.x = g_point.x % 1000003");
+                    }
+                    _ => {
+                        self.line(&format!("if team.scores.len() > {k} {{"));
+                        self.line(&format!("    team.scores[{k}] {op} {value}"));
+                        self.line(&format!("    team.scores[{k}] = team.scores[{k}] % 1000003"));
+                        self.line("}");
+                    }
+                }
+            }
+            5 => {
+                // A string value.
+                let name = self.fresh("c");
+                let text = self.rng.pick(TEXTS);
+                let n = self.bounded_int(2);
+                self.line(&format!("var {name} = pos_label({n}) catch err {{"));
+                self.line(&format!("    {body}"));
+                self.line(&format!("    {text} + err.message"));
+                self.line("}");
+                self.add_var(&name, Ty::Str, 80);
+            }
+            _ => match self.returns {
+                // `return call() catch ...` in a function that returns an int.
+                Some(Some(Ty::Int)) if self.rng.chance(50) => {
+                    let cond = self.boolean(1);
+                    self.line(&format!("if {cond} {{"));
+                    self.line(&format!("    return {call} catch err {{"));
+                    self.line(&format!("        {body}"));
+                    self.line(&format!("        {fallback}"));
+                    self.line("    }");
+                    self.line("}");
+                }
+                _ => {
+                    self.line(&format!("{call} catch err {{"));
+                    self.line("    print(err.message)");
+                    self.line("}");
+                }
+            },
+        }
+    }
+
+    fn map_op(&mut self) {
+        // Keys are computed without calls, so that two uses of the same key
+        // expression in a statement give the same key.
+        let key = self.calmly(|g| g.short_string().0);
+        let id = self.calmly(|g| g.bounded_int(1));
+        let small = self.rng.between(-99, 99);
+        if self.frozen_maps {
+            // Reading only.
+            match self.rng.below(3) {
+                0 => self.line(&format!("g_count = (g_count + (g_ages.get({key}) or {small})) % 1000")),
+                1 => self.line(&format!("print(g_ages.has({key}), g_ids.has({id} % 40), g_ages.len())")),
+                _ => {
+                    self.line(&format!("if g_ids.has({id} % 40) {{"));
+                    self.line(&format!("    g_text += g_ids[{id} % 40]"));
+                    self.line("}");
+                }
+            }
+            return;
+        }
+        match self.rng.below(14) {
+            0 | 1 => {
+                let e = self.bounded_int(2);
+                self.line(&format!("g_ages[{key}] = {e}"));
+            }
+            2 => {
+                self.line(&format!("g_ages[{key}] = (g_ages.get({key}) or 0) + {small}"));
+            }
+            3 => {
+                self.line(&format!("if g_ages.has({key}) {{"));
+                self.line(&format!("    g_ages[{key}] += {small}"));
+                self.line("}");
+            }
+            4 => self.line(&format!("g_ages.remove({key})")),
+            5 | 6 => {
+                let (s, _) = self.short_string();
+                self.line(&format!("g_ids[{id} % 40] = {s}"));
+            }
+            7 => {
+                self.line(&format!("if g_ids.has({id} % 40) && g_ids[{id} % 40].len() < 30 {{"));
+                self.line(&format!("    g_ids[{id} % 40] += \"+\""));
+                self.line("}");
+            }
+            8 => self.line(&format!("g_ids.remove({id} % 40)")),
+            9 => {
+                if self.loops == 0 {
+                    self.line("print(g_ages, g_ids.keys(), g_ids.values(), g_ages.keys().sort())");
+                } else {
+                    self.line("print(g_ages.len(), g_ids.len())");
+                }
+            }
+            10 => {
+                if self.rng.chance(20) {
+                    let clear = self.rng.pick(&["g_ages.clear()", "g_ids.clear()"]);
+                    self.line(clear);
+                } else {
+                    self.line(&format!("g_ages[\"k\" + str({id} % 30)] = {small}"));
+                }
+            }
+            11 if self.loops < self.max_loops => {
+                // Walking a map: nothing may change it meanwhile.
+                let over_ages = self.rng.chance(50);
+                let key = self.fresh("k");
+                let (map, ty, size) = if over_ages { ("g_ages", Ty::Str, 80) } else { ("g_ids", Ty::Int, INT_LIMIT) };
+                let guard = self.fresh("n");
+                self.line(&format!("var {guard} = 0"));
+                self.line(&format!("for {key} in {map} {{"));
+                self.loops += 1;
+                self.indent += 1;
+                self.line(&format!("{guard} += 1"));
+                self.line(&format!("if {guard} > 8 {{"));
+                self.line("    break");
+                self.line("}");
+                self.line(&format!("g_count = (g_count + {guard}) % 1000"));
+                if over_ages {
+                    self.line(&format!("if {key}.len() > 3 && {map}[{key}] > 0 || {key} == \"a\" {{"));
+                    self.line(&format!("    g_text += {key}"));
+                    self.line("}");
+                } else {
+                    self.line(&format!("g_count = (g_count + {key} + {map}[{key}].len()) % 1000"));
+                }
+                let (calm, frozen) = (self.calm, self.frozen_maps);
+                self.calm = true;
+                self.frozen_maps = true;
+                self.scopes.push(vec![Var { name: key, ty, size, assignable: false, accumulator: false }]);
+                let n = 1 + self.rng.below(3);
+                for _ in 0..n {
+                    if self.budget > 0 {
+                        self.stmt();
+                    }
+                }
+                self.scopes.pop();
+                self.calm = calm;
+                self.frozen_maps = frozen;
+                self.indent -= 1;
+                self.loops -= 1;
+                self.line("}");
+            }
+            12 => {
+                self.line(&format!("var copy_{0} = g_ages", self.counter + 1));
+                self.counter += 1;
+                self.line(&format!("print(copy_{0} == g_ages, g_ages.len() == g_ages.keys().len(), g_ids == g_ids)", self.counter));
+            }
+            _ => {
+                self.line(&format!("if g_ages.has({key}) {{"));
+                self.line(&format!("    g_count = g_ages[{key}] % 1000"));
+                self.line("}");
+            }
+        }
+    }
+
     fn call_stmt(&mut self) {
-        if self.callable == 0 {
+        if self.callable == 0 || self.calm {
             return self.print();
         }
         let index = self.rng.below(self.callable);
         let call = self.call_text(index);
+        if self.functions[index].fallible {
+            // The failure is handled here, by a block that may leave.
+            let name = self.fresh("r");
+            let body = self.catch_body();
+            let default = match self.functions[index].ret {
+                Some(Ty::Int) => self.rng.between(-9, 9).to_string(),
+                _ => self.rng.pick(TEXTS).to_string(),
+            };
+            self.line(&format!("var {name} = {call} catch err {{"));
+            self.line(&format!("    {body}"));
+            match self.catch_exit() {
+                Some(exit) if self.rng.chance(40) => self.line(&format!("    {exit}")),
+                _ => self.line(&format!("    {default}")),
+            }
+            self.line("}");
+            let ty = self.functions[index].ret.unwrap();
+            self.add_var(&name, ty, if ty == Ty::Int { INT_LIMIT } else { GROWING });
+            return;
+        }
         match self.functions[index].ret {
             Some(ty) if self.rng.chance(60) => {
                 let name = self.fresh("r");
@@ -1362,6 +1673,11 @@ impl Gen {
             let word = self.rng.pick(&["break", "continue"]);
             self.line(&format!("if {cond} {{"));
             self.line(&format!("    {word}"));
+            self.line("}");
+        } else if self.can_try && self.rng.chance(40) {
+            let detail = self.calmly(|g| g.bounded_int(1));
+            self.line(&format!("if {cond} {{"));
+            self.line(&format!("    fail \"gave up at {{{detail}}}\""));
             self.line("}");
         } else if let Some(ret) = self.returns {
             self.line(&format!("if {cond} {{"));
@@ -1388,6 +1704,7 @@ impl Gen {
         } else {
             None
         };
+        let fallible = matches!(ret, Some(Ty::Int | Ty::Str)) && self.rng.chance(35);
         let name = format!("f{index}");
         let mut scope = Vec::new();
         let mut header = Vec::new();
@@ -1397,12 +1714,13 @@ impl Gen {
             let size = if ty == Ty::Int { INT_LIMIT } else { GROWING };
             scope.push(Var { name: param, ty, size, assignable: true, accumulator: ty == Ty::Str });
         }
-        let arrow = ret.map(|ty| format!(" -> {}", ty.name())).unwrap_or_default();
+        let arrow = ret.map(|ty| format!(" -> {}{}", ty.name(), if fallible { "!" } else { "" })).unwrap_or_default();
         self.line(&format!("fn {name}({}){arrow} {{", header.join(", ")));
 
         // The first functions call nobody; the later ones may call the first ones.
         self.callable = if index < 3 { 0 } else { 3.min(self.functions.len()) };
         self.returns = Some(ret);
+        self.can_try = fallible;
         self.max_loops = 2;
         self.budget = 14;
         self.indent += 1;
@@ -1421,7 +1739,8 @@ impl Gen {
         self.indent -= 1;
         self.line("}");
         self.line("");
-        self.functions.push(Function { name, params, ret });
+        self.can_try = false;
+        self.functions.push(Function { name, params, ret, fallible });
     }
 
     fn program(seed: u64) -> String {
@@ -1438,6 +1757,8 @@ impl Gen {
             max_loops: 2,
             budget: 0,
             calm: false,
+            can_try: false,
+            frozen_maps: false,
         };
         // The top-level variables of the prelude.
         g.scopes.push(vec![
@@ -1469,11 +1790,14 @@ impl Gen {
         for index in 0..g.functions.len() {
             let call = g.call_text(index);
             match g.functions[index].ret {
+                Some(Ty::Int) if g.functions[index].fallible => g.line(&format!("print({call} or -1)")),
+                Some(_) if g.functions[index].fallible => g.line(&format!("print({call} or \"it failed\")")),
                 Some(_) => g.line(&format!("print({call})")),
                 None => g.line(&call),
             }
         }
         g.line("print(g_count, g_text, g_list, g_names, g_point)");
+        g.line("print(g_ages, g_ids)");
         g.line("print(team.name, team.members.len(), team.scores, team.total())");
         g.line("print(team)");
         g.line("var shown = 0");

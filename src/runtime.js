@@ -69,12 +69,41 @@ const $rt = (() => {
   };
 
   // ---- error handling ----
+  /**
+   * An error on its way out of a function because of a `?` written inside the
+   * subject of `depth` enclosing `or`/`catch` handlers, which must not stop it.
+   */
+  class Passed {
+    constructor(error, depth) {
+      this.error = error;
+      this.depth = depth;
+    }
+  }
+  /** What a handler does with something it does not handle. */
+  const through = (e) => {
+    if (e instanceof Passed && --e.depth === 0) throw e.error;
+    throw e;
+  };
+  const pass = (depth, f) => {
+    try {
+      return f();
+    } catch (e) {
+      throw e instanceof OnyxError ? new Passed(e, depth) : e;
+    }
+  };
+  const passAsync = async (depth, f) => {
+    try {
+      return await f();
+    } catch (e) {
+      throw e instanceof OnyxError ? new Passed(e, depth) : e;
+    }
+  };
   const or = (f, d) => {
     try {
       return f();
     } catch (e) {
       if (e instanceof OnyxError) return d();
-      throw e;
+      through(e);
     }
   };
   const orAsync = async (f, d) => {
@@ -82,13 +111,13 @@ const $rt = (() => {
       return await f();
     } catch (e) {
       if (e instanceof OnyxError) return d();
-      throw e;
+      through(e);
     }
   };
   /** Used by generated `catch` blocks: lets anything that is not an Onyx error through. */
   const caught = (e) => {
     if (e instanceof OnyxError) return e;
-    throw e;
+    through(e);
   };
 
   // ---- concurrency ----
@@ -304,7 +333,7 @@ const $rt = (() => {
 
   return {
     OnyxError, Chan, CLOSED, panic, fail, str, fstr, print, idiv, imod, idx, setIdx, mapGet, eq,
-    or, orAsync, caught, fork, sleep, run, runTests, expect, parseInt_, parseFloat_, readFile,
+    or, orAsync, pass, passAsync, caught, fork, sleep, run, runTests, expect, parseInt_, parseFloat_, readFile,
     writeFile, appendFile, fileExists, args, env, exit, input, fetch_, randomInt, list, strIdx,
     repeat, mapTryGet,
     setWriter: (w) => (write = w),

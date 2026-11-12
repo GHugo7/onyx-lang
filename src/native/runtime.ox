@@ -28,11 +28,14 @@
 //            +16 the UTF-8 bytes
 //   list:    +8 length   +16 capacity   +24 address of the elements (8 bytes each)
 //   struct:  +8 first field, +16 second field, ...
+//   map:     see "maps" below
 //
 // TYPE DESCRIPTORS (8-byte words)
 //
 //   +0 kind:  0 int   1 bool   2 float   3 string   4 list   5 struct   6 interface
+//             7 map
 //   list:     +8 descriptor of the elements
+//   map:      +8 descriptor of the keys   +16 descriptor of the values
 //   struct:   +8 name   +16 number of fields   +24 method table
 //             then for each field: its name, its descriptor
 //   method table: +0 count, then for each method: its name, its address
@@ -51,6 +54,7 @@
 
 const __KIND_STRING = 3
 const __KIND_LIST = 4
+const __KIND_MAP = 7
 
 // The runtime's private memory, at __state():
 const __S_END = 8          // end of the current chunk (its next free byte is at +0)
@@ -191,6 +195,13 @@ fn __rt_destroy(p: int) {
             __rt_free(data, __load64(p + 16) * 8)
         }
         size = 32
+    } else if kind == __KIND_MAP {
+        __rt_map_clear(p)
+        if __load64(p + 32) != 0 {
+            __rt_free(__load64(p + 32), __load64(p + 24) * 24)
+            __rt_free(__load64(p + 48), __load64(p + 40) * 8)
+        }
+        size = 56
     } else {
         var n = __load64(td + 16)
         var i = 0
@@ -437,6 +448,59 @@ fn __rt_int_into(buffer: int, n: int) -> int {
     return s
 }
 
+fn __rt_is_space(c: int) -> bool {
+    return c == 32 || (c >= 9 && c <= 13)
+}
+
+// Reads a whole number, with an optional sign and spaces around it.
+fn __rt_parse_int(s: string) -> int! {
+    var p = __str_ptr(s)
+    var n = __load32(p + 8)
+    var i = 0
+    while i < n && __rt_is_space(__load8(p + 16 + i)) {
+        i += 1
+    }
+    var negative = false
+    if i < n {
+        var sign = __load8(p + 16 + i)
+        if sign == 45 || sign == 43 {
+            negative = sign == 45
+            i += 1
+        }
+    }
+    // The number is built on the negative side, where the smallest int fits.
+    var value = 0
+    var digits = 0
+    var fits = true
+    while i < n {
+        var c = __load8(p + 16 + i)
+        if c < 48 || c > 57 {
+            break
+        }
+        var digit = c - 48
+        if value < -922337203685477580 || (value == -922337203685477580 && digit > 8) {
+            fits = false
+        } else {
+            value = value * 10 - digit
+        }
+        digits += 1
+        i += 1
+    }
+    while i < n && __rt_is_space(__load8(p + 16 + i)) {
+        i += 1
+    }
+    if !negative && value == -9223372036854775807 - 1 {
+        fits = false
+    }
+    if digits == 0 || i < n || !fits {
+        fail "cannot convert " + __rt_quote(p) + " to int"
+    }
+    if negative {
+        return value
+    }
+    return -value
+}
+
 // A string, between double quotes and with special characters escaped.
 fn __rt_quote(p: int) -> string {
     var n = __load32(p + 8)
@@ -520,6 +584,30 @@ fn __rt_repr(v: int, td: int, quoted: bool) -> string {
         items += "]"
         return items
     }
+    if kind == __KIND_MAP {
+        var keys = __load64(td + 8)
+        var values = __load64(td + 16)
+        var used = __load64(v + 16)
+        var entries = __load64(v + 32)
+        var text = "\{"
+        var shown = 0
+        var e = 0
+        while e < used {
+            var entry = entries + e * 24
+            if __load64(entry) >= 0 {
+                if shown > 0 {
+                    text += ", "
+                }
+                shown += 1
+                text += __rt_repr(__load64(entry + 8), keys, true)
+                text += ": "
+                text += __rt_repr(__load64(entry + 16), values, true)
+            }
+            e += 1
+        }
+        text += "\}"
+        return text
+    }
     var out = __ptr_str(__load64(td + 8)) + "\{"
     var n = __load64(td + 16)
     var i = 0
@@ -569,6 +657,28 @@ fn __rt_eq(a: int, b: int, td: int) -> bool {
         }
         return true
     }
+    if kind == __KIND_MAP {
+        // Same keys with equal values, whatever the order.
+        if __load64(a + 8) != __load64(b + 8) {
+            return false
+        }
+        var keys = __load64(td + 8)
+        var values = __load64(td + 16)
+        var used = __load64(a + 16)
+        var entries = __load64(a + 32)
+        var e = 0
+        while e < used {
+            var entry = entries + e * 24
+            if __load64(entry) >= 0 {
+                var twin = __rt_map_find(b, __load64(entry + 8), __load64(entry))
+                if twin == 0 || !__rt_eq(__load64(entry + 16), __load64(twin + 16), values) {
+                    return false
+                }
+            }
+            e += 1
+        }
+        return true
+    }
     var n = __load64(td + 16)
     var i = 0
     while i < n {
@@ -578,6 +688,283 @@ fn __rt_eq(a: int, b: int, td: int) -> bool {
         i += 1
     }
     return true
+}
+
+// ---- maps ----
+//
+// A map keeps its entries in the order they were added:
+//
+//   +8   number of entries
+//   +16  number of entry slots used (removed entries keep their slot)
+//   +24  number of entry slots
+//   +32  address of the entries, 24 bytes each:
+//          +0 hash of the key (-1 once removed)   +8 key   +16 value
+//   +40  size of the index (a power of two, at least twice the entry slots)
+//   +48  address of the index: for each position, an entry number + 1, or 0
+//
+// A key is looked up by hashing it to a position in the index and walking
+// forward from there until its entry, or an empty position, is found.
+//
+// A key shown to these functions is only borrowed; the map retains the keys
+// it stores. A value given to __rt_map_set moves into the map.
+
+fn __rt_map_new(td: int) -> int {
+    var m = __rt_new(td, 56)
+    __store64(m + 8, 0)
+    __store64(m + 16, 0)
+    __store64(m + 24, 0)
+    __store64(m + 32, 0)
+    __store64(m + 40, 0)
+    __store64(m + 48, 0)
+    return m
+}
+
+// A number between 0 and 2^31 - 1 that depends on every bit of the key.
+fn __rt_hash(key: int, td: int) -> int {
+    var h = key
+    if __load64(td) == __KIND_STRING {
+        var n = __load32(key + 8)
+        h = n
+        var i = 0
+        while i + 8 <= n {
+            h = h * 31 + __load64(key + 16 + i)
+            i += 8
+        }
+        while i < n {
+            h = h * 31 + __load8(key + 16 + i)
+            i += 1
+        }
+    }
+    // Multiplying by a large odd number spreads the key over all 64 bits;
+    // the high ones are the best mixed.
+    return __and(h * -7046029254386353131 / 65536 / 65536, 2147483647)
+}
+
+// The address of the entry that holds `key`, or 0.
+fn __rt_map_find(m: int, key: int, hash: int) -> int {
+    var slots = __load64(m + 40)
+    if slots == 0 {
+        return 0
+    }
+    var index = __load64(m + 48)
+    var entries = __load64(m + 32)
+    var strings = __load64(__load64(__load32(m + 4) + 8)) == __KIND_STRING
+    var at = __and(hash, slots - 1)
+    while true {
+        var number = __load64(index + at * 8)
+        if number == 0 {
+            return 0
+        }
+        var entry = entries + (number - 1) * 24
+        if __load64(entry) == hash {
+            var other = __load64(entry + 8)
+            if other == key {
+                return entry
+            }
+            if strings && __load32(other + 8) == __load32(key + 8) && __rt_bytes_cmp(other, key) == 0 {
+                return entry
+            }
+        }
+        at = __and(at + 1, slots - 1)
+    }
+    return 0
+}
+
+// Records in the index that the entry `number - 1` has this hash.
+fn __rt_map_index(index: int, slots: int, hash: int, number: int) {
+    var at = __and(hash, slots - 1)
+    while __load64(index + at * 8) != 0 {
+        at = __and(at + 1, slots - 1)
+    }
+    __store64(index + at * 8, number)
+}
+
+// Gives the map room for `capacity` entries, leaving the removed ones behind.
+fn __rt_map_resize(m: int, capacity: int) {
+    var old = __load64(m + 32)
+    var used = __load64(m + 16)
+    if old != 0 {
+        __rt_free(__load64(m + 48), __load64(m + 40) * 8)
+    }
+    var slots = 16
+    while slots < capacity * 2 {
+        slots = slots * 2
+    }
+    var index = __rt_alloc(slots * 8)
+    var i = 0
+    while i < slots {
+        __store64(index + i * 8, 0)
+        i += 1
+    }
+    var entries = __rt_alloc(capacity * 24)
+    var count = 0
+    i = 0
+    while i < used {
+        var from = old + i * 24
+        var hash = __load64(from)
+        if hash >= 0 {
+            var to = entries + count * 24
+            __store64(to, hash)
+            __store64(to + 8, __load64(from + 8))
+            __store64(to + 16, __load64(from + 16))
+            count += 1
+            __rt_map_index(index, slots, hash, count)
+        }
+        i += 1
+    }
+    if old != 0 {
+        __rt_free(old, __load64(m + 24) * 24)
+    }
+    __store64(m + 16, count)
+    __store64(m + 24, capacity)
+    __store64(m + 32, entries)
+    __store64(m + 40, slots)
+    __store64(m + 48, index)
+}
+
+fn __rt_map_set(m: int, key: int, value: int) {
+    var td = __load32(m + 4)
+    var hash = __rt_hash(key, __load64(td + 8))
+    var entry = __rt_map_find(m, key, hash)
+    if entry != 0 {
+        var old = __load64(entry + 16)
+        __store64(entry + 16, value)
+        if __load64(__load64(td + 16)) >= 3 {
+            __rt_release(old)
+        }
+        return
+    }
+    var used = __load64(m + 16)
+    if used == __load64(m + 24) {
+        var capacity = __load64(m + 8) * 2
+        if capacity < 8 {
+            capacity = 8
+        }
+        __rt_map_resize(m, capacity)
+        used = __load64(m + 16)
+    }
+    var to = __load64(m + 32) + used * 24
+    __store64(to, hash)
+    __store64(to + 8, key)
+    __store64(to + 16, value)
+    if __load64(__load64(td + 8)) >= 3 {
+        __rt_retain(key)
+    }
+    __rt_map_index(__load64(m + 48), __load64(m + 40), hash, used + 1)
+    __store64(m + 16, used + 1)
+    __store64(m + 8, __load64(m + 8) + 1)
+}
+
+fn __rt_map_entry(m: int, key: int) -> int {
+    return __rt_map_find(m, key, __rt_hash(key, __load64(__load32(m + 4) + 8)))
+}
+
+// `m[key]`: the value, for which the caller gets its own reference.
+fn __rt_map_at(m: int, key: int) -> int {
+    var td = __load32(m + 4)
+    var entry = __rt_map_entry(m, key)
+    if entry == 0 {
+        __rt_panic("key not found in map: " + __rt_repr(key, __load64(td + 8), true))
+    }
+    var value = __load64(entry + 16)
+    if __load64(__load64(td + 16)) >= 3 {
+        __rt_retain(value)
+    }
+    return value
+}
+
+// `m.get(key)`: like `m[key]`, but a missing key is an error to handle.
+fn __rt_map_get(m: int, key: int) -> int! {
+    var td = __load32(m + 4)
+    var entry = __rt_map_entry(m, key)
+    if entry == 0 {
+        fail "key not found: " + __rt_repr(key, __load64(td + 8), true)
+    }
+    var value = __load64(entry + 16)
+    if __load64(__load64(td + 16)) >= 3 {
+        __rt_retain(value)
+    }
+    return value
+}
+
+fn __rt_map_has(m: int, key: int) -> bool {
+    return __rt_map_entry(m, key) != 0
+}
+
+// Lets go of what an entry holds and marks it as removed.
+fn __rt_map_drop(m: int, entry: int) {
+    var td = __load32(m + 4)
+    if __load64(__load64(td + 8)) >= 3 {
+        __rt_release(__load64(entry + 8))
+    }
+    if __load64(__load64(td + 16)) >= 3 {
+        __rt_release(__load64(entry + 16))
+    }
+    __store64(entry, -1)
+}
+
+fn __rt_map_remove(m: int, key: int) {
+    var entry = __rt_map_entry(m, key)
+    if entry != 0 {
+        __rt_map_drop(m, entry)
+        __store64(m + 8, __load64(m + 8) - 1)
+    }
+}
+
+fn __rt_map_clear(m: int) {
+    var used = __load64(m + 16)
+    var entries = __load64(m + 32)
+    var i = 0
+    while i < used {
+        if __load64(entries + i * 24) >= 0 {
+            __rt_map_drop(m, entries + i * 24)
+        }
+        i += 1
+    }
+    var index = __load64(m + 48)
+    var slots = __load64(m + 40)
+    i = 0
+    while i < slots {
+        __store64(index + i * 8, 0)
+        i += 1
+    }
+    __store64(m + 8, 0)
+    __store64(m + 16, 0)
+}
+
+// The number of the first entry at or after `from` that was not removed, or -1.
+fn __rt_map_next(m: int, from: int) -> int {
+    var used = __load64(m + 16)
+    var entries = __load64(m + 32)
+    var i = from
+    while i < used {
+        if __load64(entries + i * 24) >= 0 {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+// The key (`which` = 8) or the value (`which` = 16) of entry number `i`.
+fn __rt_map_part(m: int, i: int, which: int) -> int {
+    return __load64(__load64(m + 32) + i * 24 + which)
+}
+
+// A new list (of type `td`) of the keys or of the values, in order.
+fn __rt_map_list(m: int, td: int, which: int) -> int {
+    var out = __rt_list_new(td, __load64(m + 8))
+    var refs = __load64(__load64(td + 8)) >= 3
+    var i = __rt_map_next(m, 0)
+    while i >= 0 {
+        var v = __rt_map_part(m, i, which)
+        if refs {
+            __rt_retain(v)
+        }
+        __rt_list_push(out, v)
+        i = __rt_map_next(m, i + 1)
+    }
+    return out
 }
 
 // ---- lists ----
@@ -661,6 +1048,42 @@ fn __rt_list_remove(list: int, i: int) -> int {
     }
     __store64(list + 8, n - 1)
     return removed
+}
+
+// The last element, which moves out of the list.
+fn __rt_list_pop(list: int) -> int! {
+    var n = __load64(list + 8)
+    if n == 0 {
+        fail "the list is empty"
+    }
+    __store64(list + 8, n - 1)
+    return __load64(__load64(list + 24) + (n - 1) * 8)
+}
+
+// An element of a list that must not be empty; the caller gets its own
+// reference to it.
+fn __rt_list_edge(list: int, last: bool) -> int! {
+    var n = __load64(list + 8)
+    if n == 0 {
+        fail "the list is empty"
+    }
+    var position = 0
+    if last {
+        position = n - 1
+    }
+    var v = __load64(__load64(list + 24) + position * 8)
+    if __rt_list_holds_refs(list) {
+        __rt_retain(v)
+    }
+    return v
+}
+
+fn __rt_list_first(list: int) -> int! {
+    return __rt_list_edge(list, false)?
+}
+
+fn __rt_list_last(list: int) -> int! {
+    return __rt_list_edge(list, true)?
 }
 
 fn __rt_list_clear(list: int) {
@@ -919,6 +1342,15 @@ fn __rt_panic(message: string) {
     __rt_write(2, message)
     __rt_write(2, "\n")
     __syscall(231, 2, 0, 0, 0, 0, 0)
+}
+
+// `main` returned an error that nobody handled.
+fn __rt_main_failed(message: string) {
+    __rt_flush()
+    __rt_write(2, "error: ")
+    __rt_write(2, message)
+    __rt_write(2, "\n")
+    __syscall(231, 1, 0, 0, 0, 0, 0)
 }
 
 fn __rt_fatal(message: string) {

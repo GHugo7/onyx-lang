@@ -230,7 +230,7 @@ mod native {
 
     #[test]
     fn unsupported_features_are_reported_not_miscompiled() {
-        let out = run_source("map.ox", "fn main() {\n    var ages = {\"a\": 1}\n    print(ages.len())\n}\n");
+        let out = run_source("float.ox", "fn main() {\n    var half = 0.5\n    print(half)\n}\n");
         assert_eq!(out.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&out.stderr).contains("error[E0500]"));
     }

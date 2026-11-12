@@ -93,6 +93,17 @@ fn main() -> void! {
 `main` may be declared `-> void!`. An error that reaches the top prints
 `error: <message>` and the program exits with code 1.
 
+`?` always means "leave this function", even when it is written inside an
+expression that `or` or `catch` protects. Those two only deal with the failure
+of the call they are attached to:
+
+```onyx
+fn port(text: string) -> int! {
+    // A missing file ends `port`; a file that holds no number gives 8080.
+    return parse_int(read_file(text)?) or 8080
+}
+```
+
 ## Errors and panics
 
 A *failure* (`fail`) is an expected situation the caller should deal with: a

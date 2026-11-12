@@ -123,6 +123,8 @@ pub struct Analysis {
     pub fns: HashMap<String, Rc<FnSig>>,
     /// `catch` expressions whose block ends with a value.
     pub catch_values: HashSet<usize>,
+    /// Calls that can fail.
+    pub fallible_calls: HashSet<usize>,
 }
 
 pub fn fn_key(name: &str) -> String {
@@ -1143,6 +1145,9 @@ impl<'a> Checker<'a> {
             ExprKind::Binary { op, lhs, rhs } => self.binary(e, *op, lhs, rhs),
             ExprKind::Call { callee, args } => {
                 let (ty, fallible) = self.call(e, callee, args, expected);
+                if fallible {
+                    self.an.fallible_calls.insert(e.id);
+                }
                 let handled = self.handling.remove(&e.id);
                 if fallible && !handled {
                     let name = self.text(callee.span).to_string();
