@@ -17,7 +17,8 @@ onyx build --target native hello.ox
 ./build/hello
 ```
 
-A hello-world executable is about 9 KB.
+A hello-world executable is about 2.3 KB: only the functions a program
+really uses, the runtime's included, end up in it.
 
 ## Status: experimental
 
@@ -33,22 +34,22 @@ The native target is being built up step by step. It currently supports:
 - `var`, assignment, `if` / `else`, `while`, `for i in a..b`, `break`,
   `continue`, `return`
 - arithmetic, comparisons, `&&`, `||`, `!`
-- string interpolation, `+`, comparisons and `.len()`
+- string interpolation, `+`, `+=`, comparisons and `.len()`
 - `print`, `str`, `abs`, `min`, `max`, `exit`, `panic`
 - modules (`import`)
 
 Anything else (floats, maps, lambdas, error handling, `fork`, channels, the
 other string methods, `map` / `filter` / `sort_by`) is rejected with error
 `E0500` rather than compiled incorrectly. Those programs still run on the
-default JavaScript target.
+default JavaScript target. Functions that are never called are not compiled,
+so an unsupported feature in unused code does not get in the way.
 
 Known gaps in what is supported:
 
 - Infinite recursion ends with `killed by signal 11` instead of a clean
-  message.
-- The generated code is not optimized. Arithmetic and calls are fast, but
-  programs that create many objects are currently slower than on the
-  JavaScript target.
+  message. So does dropping a chain of objects nested hundreds of thousands
+  deep (a hand-made linked list, say), because they are released recursively.
+- Every list element takes 8 bytes, a `bool` included.
 - Only Linux on x86-64 is supported.
 
 ## Memory
@@ -71,8 +72,12 @@ fn main() {
 }                                  // both variables go away: count = 0, freed
 ```
 
-Freed memory is reused immediately: a loop that creates 90 million short-lived
-objects runs in about 50 KB of memory.
+Freed memory is reused immediately: a loop that creates 9 million short-lived
+objects peaks at 32 KB of memory.
+
+Objects are compact. Each one starts with an 8-byte header (a 32-bit count and
+the 32-bit address of its type's description); a struct with two fields takes
+24 bytes, and blocks carry no hidden size field.
 
 **The limit: cycles.** Two objects that point to each other keep each other
 alive forever, because neither count can reach zero:
@@ -102,6 +107,44 @@ onyx run --target native --leak-check main.ox
 
 It exits with code 3 and a message if objects are still alive at the end.
 
+## What the compiler does to make programs fast
+
+Before code generation, for every target (`src/optimize.rs`):
+
+- constant expressions are computed (`24 * 60 * 60` becomes `86400`);
+- `const` values are copied into their uses;
+- branches that cannot run and statements after a `return` are removed.
+
+In the native code generator (`src/native/mod.rs`, `src/native/plan.rs`):
+
+- **Variables in registers.** The six most used variables of each function
+  live in processor registers; uses inside loops weigh more.
+- **Direct operations.** `x + 1`, `i < n` or `total += price` work on the
+  variable where it is. A condition is a comparison followed by a jump, not a
+  boolean that is computed and then tested.
+- **No division instruction for constants.** Dividing or taking the remainder
+  by a constant is done with shifts or with one multiplication, which is
+  several times faster. `x * 8` is a shift.
+- **Borrowed arguments.** Passing a local variable to a function does not
+  touch its reference count. Fields and list elements are read without
+  counting when nothing can interfere.
+- **Reference counting in place.** Retaining is two instructions; releasing
+  only calls the runtime when the count reaches zero.
+- **Strings that grow in place.** `s += piece` extends the string when no
+  other variable holds it, so building a long text is linear, not quadratic.
+  An interpolated string is assembled with a single allocation, and `print`
+  writes its pieces without building the string at all.
+- **Numbers without allocation.** The text of a number being printed or
+  interpolated is written into a buffer on the stack.
+- **Buffered output.** `print` fills a 64 KB buffer, written out when it is
+  full, when the program ends, and after every line on a terminal.
+- **Remembered method lookups.** A call through an interface remembers the
+  last type it saw and the method it found.
+- **Lists.** Reading an element is a bounds check and a load; `push` stores
+  in place when the list has room.
+
+Measurements are in [`benchmarks/`](../benchmarks/README.md).
+
 ## How it works
 
 The pipeline is the same as for JavaScript up to the type checker; only the
@@ -110,20 +153,34 @@ last stage differs.
 | File | Role |
 | --- | --- |
 | `src/native/mod.rs` | Walks the checked program and emits machine code |
+| `src/native/plan.rs` | Chooses the variables that live in registers |
 | `src/native/asm.rs` | Encodes x86-64 instructions and resolves labels |
 | `src/native/elf.rs` | Wraps the code in an ELF executable |
 | `src/native/runtime.ox` | The runtime, **written in Onyx** |
 
-The generated code is a simple stack machine: an expression leaves its value
-in `rax`, intermediate values are pushed on the stack, local variables live in
-the function's frame. It is not optimized yet.
+An expression leaves its value in `rax`; `rcx`, `rdx` and `r8`-`r11` are
+scratch. Arguments are pushed on the stack and the result comes back in
+`rax`. `r15` holds the address of the runtime's state, which is followed by
+the program's top-level variables. The conventions are described at the top
+of `mod.rs`.
 
 The runtime (the memory allocator, reference counting, strings, lists,
 printing, equality) is ordinary Onyx code compiled along with every program.
 It relies on a few low-level operations that only it may use: reading and
-writing memory (`__load8`, `__store64`, ...) and calling the kernel
-(`__syscall`). The layout of objects in memory is documented at the top of
-`runtime.ox`.
+writing memory (`__load8`, `__store64`, ...), copying bytes (`__copy`) and
+calling the kernel (`__syscall`). The layout of objects in memory is
+documented at the top of `runtime.ox`.
+
+## How it is tested
+
+- Every program in `tests/native` runs on both targets: the outputs must be
+  identical, and the native run must release every object.
+- `tests/fuzz.rs` generates random programs and holds them to the same
+  standard. `cargo test` tries a few dozen; `ONYX_FUZZ_SEEDS=5000 cargo test
+  --release --test fuzz` searches harder.
+- The instruction encoder is tested against the bytes that GNU `as`
+  produces for the same instructions, and division by constants against
+  real division over the whole 64-bit range.
 
 ## Roadmap for this target
 

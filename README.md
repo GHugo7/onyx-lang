@@ -198,7 +198,7 @@ check "add works" {
 
 - [The Onyx Book](docs/book/README.md): a guided tour, chapter by chapter
 - [Standard library reference](docs/stdlib.md)
-- [The native target](docs/native.md)
+- [The native target](docs/native.md), and how fast it is: [benchmarks](benchmarks/README.md)
 - [Examples](examples)
 - [Roadmap](docs/roadmap.md)
 
@@ -206,11 +206,12 @@ check "add works" {
 
 ```bash
 cargo build
-cargo test        # runs every program in tests/ and every example in the docs
+cargo test        # runs every program in tests/, every example in the docs,
+                  # and a few dozen randomly generated programs
 ```
 
 The pipeline is `lexer.rs` → `parser.rs` → `modules.rs` (imports) →
-`checker.rs` → `codegen_js.rs`,
+`checker.rs` → `optimize.rs` (constant folding, dead code) → `codegen_js.rs`,
 with the JavaScript runtime in `src/runtime.js`. The native backend lives in
 `src/native` and its runtime is written in Onyx (`src/native/runtime.ox`). To add a test, drop a `.ox`
 file and its expected `.out` in `tests/run`, or a program that must be rejected

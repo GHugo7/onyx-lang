@@ -176,6 +176,43 @@ mod native {
         );
     }
 
+    /// Divisions, remainders and multiplications by constants are compiled
+    /// into shifts and multiplications. Over the whole 64-bit range, which
+    /// JavaScript cannot check, they must agree with the same operations done
+    /// with the processor's division instruction (a divisor in a variable).
+    #[test]
+    fn arithmetic_with_constants_is_exact_on_64_bits() {
+        let divisors: [i64; 30] = [
+            1, -1, 2, -2, 3, -3, 5, 7, -7, 8, 10, -10, 16, 60, 100, 127, 255, 256, 641, 1000, 4096, 65535, 65536, 99999,
+            1000003, 1048576, 123456789, 2147483647, -2147483647, -2147483648,
+        ];
+        let inputs = "[0, 1, -1, 99, -100, 4294967295, -4294967296, 9007199254740993, -9007199254740993, \
+            1152921504606846975, -1152921504606846976, 4611686018427387904, -4611686018427387905, \
+            9223372036854775806, 9223372036854775807, -9223372036854775807, -9223372036854775807 - 1, \
+            6148914691236517205, -6148914691236517206, 1234567890123456789, -987654321098765432]";
+        let mut src = format!("fn main() {{\n    var inputs = {inputs}\n    var a: [int] = []\n    for x in inputs {{\n");
+        for d in divisors {
+            src.push_str(&format!("        a.push(x / {d})\n        a.push(x % {d})\n"));
+        }
+        for m in [0i64, 1, -1, 2, 3, 8, 10, -16, 1000, 65536] {
+            src.push_str(&format!("        a.push((x / 65536) * {m})\n"));
+        }
+        src.push_str("    }\n    var divisors = [");
+        src.push_str(&divisors.map(|d| if d == i64::from(i32::MIN) { "-2147483647 - 1".to_string() } else { d.to_string() }).join(", "));
+        src.push_str("]\n    var factors = [0, 1, -1, 2, 3, 8, 10, -16, 1000, 65536]\n");
+        src.push_str("    var b: [int] = []\n    for x in inputs {\n        for d in divisors {\n");
+        src.push_str("            b.push(x / d)\n            b.push(x % d)\n        }\n");
+        src.push_str("        for m in factors {\n            b.push((x / 65536) * m)\n        }\n    }\n");
+        src.push_str("    print(a.len(), a == b)\n    print(inputs[14] / 10, inputs[16] / 7, inputs[16] % 1000, inputs[16] / -1, inputs[16] % -1)\n}\n");
+        let out = run_source("exact.ox", &src);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "1470 true\n922337203685477580 -1317624576693539401 -808 -9223372036854775808 0\n",
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn failures_set_the_exit_code() {
         let out = run_source("zero.ox", "fn main() {\n    var z = 0\n    print(1 / z)\n}\n");

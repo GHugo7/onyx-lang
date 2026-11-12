@@ -74,7 +74,11 @@ fn _check(n: int) -> int {      // not visible from other files
 
 - Imports go at the top level of a file, usually first.
 - A file is loaded once, however many times it is imported.
-- Two files may import each other.
+- Two files may import each other. Their top-level variables are still
+  initialised one file after the other, so a variable of one file cannot be
+  computed from a variable of the other in both directions; the compiler
+  reports it (`E0118`) instead of letting the program read a value that is
+  not there yet.
 - Only the file given to `onyx run` needs a `main`. A `main` in an imported
   file is an ordinary function.
 - `onyx test file.ox` runs the `check` blocks of that file only, not those of

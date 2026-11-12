@@ -162,8 +162,10 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "floor" | "ceil" | "round" => (vec![Float], Int, false, false),
         // Low-level operations of the native runtime (see src/native/runtime.ox).
         "__syscall" => (vec![Int; 7], Int, false, false),
-        "__load8" | "__load64" => (vec![Int], Int, false, false),
-        "__store8" | "__store64" => (vec![Int, Int], Void, false, false),
+        "__load8" | "__load32" | "__load64" => (vec![Int], Int, false, false),
+        "__store8" | "__store32" | "__store64" => (vec![Int, Int], Void, false, false),
+        "__copy" => (vec![Int, Int, Int], Void, false, false),
+        "__and" => (vec![Int, Int], Int, false, false),
         "__state" => (vec![], Int, false, false),
         "__str_ptr" => (vec![Str], Int, false, false),
         "__ptr_str" => (vec![Int], Str, false, false),
@@ -1005,6 +1007,14 @@ impl<'a> Checker<'a> {
                 Type::Str
             }
             ExprKind::Ident(name) => {
+                let hidden = name.starts_with("__")
+                    && !self.runtime.is_some_and(|(start, end)| e.span.start >= start && e.span.end <= end);
+                if hidden {
+                    self.err(Diagnostic::new("E0100", format!("unknown name `{name}`"), e.span)
+                        .label("not found in this scope")
+                        .help("names starting with `__` are reserved for the Onyx runtime"));
+                    return Type::Unknown;
+                }
                 if let Some(var) = self.lookup(name) {
                     self.use_global(name);
                     return var.ty;

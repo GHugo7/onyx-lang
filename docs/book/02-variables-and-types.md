@@ -15,6 +15,11 @@ fn main() {
 }
 ```
 
+Variables declared outside of any function are visible everywhere. They get
+their values one after the other, from top to bottom, before `main` starts;
+the compiler refuses a program in which one of them would be used before its
+turn (`onyx explain E0118`).
+
 Onyx is statically typed: a variable keeps the type it was created with.
 Assigning a string to `score` is a compile-time error. Every variable must be
 given a value when it is declared; there is no `null`.

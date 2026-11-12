@@ -21,9 +21,13 @@ for what works today.
    flow, modules. The runtime is written in Onyx.
 2. **Heap types** (done for structs and lists; maps are next), with
    reference counting instead of a garbage collector.
-3. **The rest of the language** on the native target: floats, error handling,
+3. **An optimising code generator** (done): variables in registers, no
+   division instruction for constants, strings that grow in place, buffered
+   output. Native programs now run faster than the JavaScript ones on nine
+   of the ten [benchmarks](../benchmarks/README.md), in a fraction of the memory.
+4. **The rest of the language** on the native target: floats, error handling,
    lambdas, files, `fork` and channels.
-4. **Self-hosting**: the compiler rewritten in Onyx.
+5. **Self-hosting**: the compiler rewritten in Onyx.
 
 ## Later
 

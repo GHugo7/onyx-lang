@@ -350,6 +350,43 @@ fn lex_number(src: &str, i: &mut usize, end: usize) -> Result<Tok, Diagnostic> {
     }
 }
 
+/// With `j` just after the `{` that opens an interpolation: the index of the
+/// matching `}`.
+fn interpolation_end(bytes: &[u8], mut j: usize, end: usize) -> Option<usize> {
+    let mut depth = 1;
+    while j < end {
+        match bytes[j] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+            b'"' => j = string_end(bytes, j + 1, end)?,
+            b'\n' => return None,
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// With `j` just after the `"` that opens a string: the index of the closing `"`.
+fn string_end(bytes: &[u8], mut j: usize, end: usize) -> Option<usize> {
+    while j < end {
+        match bytes[j] {
+            b'"' => return Some(j),
+            b'\\' => j += 1,
+            b'{' => j = interpolation_end(bytes, j + 1, end)?,
+            b'\n' => return None,
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
 fn lex_string(src: &str, i: &mut usize, end: usize) -> Result<Tok, Diagnostic> {
     let bytes = src.as_bytes();
     let open = *i;
@@ -397,39 +434,18 @@ fn lex_string(src: &str, i: &mut usize, end: usize) -> Result<Tok, Diagnostic> {
                 *i += 2;
             }
             b'{' => {
-                // Interpolation: find the matching brace, skipping nested strings.
+                // Interpolation: find the matching brace. The code inside may
+                // itself contain strings, with interpolations of their own.
                 let code_start = *i + 1;
-                let mut depth = 1;
-                let mut j = code_start;
-                while j < end && depth > 0 {
-                    match bytes[j] {
-                        b'{' => depth += 1,
-                        b'}' => depth -= 1,
-                        b'"' => {
-                            j += 1;
-                            while j < end && bytes[j] != b'"' {
-                                if bytes[j] == b'\\' {
-                                    j += 1;
-                                }
-                                if j < end && bytes[j] == b'\n' {
-                                    return Err(unterminated());
-                                }
-                                j += 1;
-                            }
-                        }
-                        b'\n' => return Err(unterminated()),
-                        _ => {}
-                    }
-                    j += 1;
-                }
-                if depth != 0 {
+                let Some(close) = interpolation_end(bytes, code_start, end) else {
                     return Err(Diagnostic::new(
                         "E0002",
                         "unterminated `{` in string",
                         Span::new(*i, *i + 1),
                     )
                     .help("write `\\{` for a literal brace"));
-                }
+                };
+                let j = close + 1;
                 if !lit.is_empty() {
                     pieces.push(StrPiece::Lit(std::mem::take(&mut lit)));
                 }

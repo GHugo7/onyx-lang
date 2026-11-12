@@ -7,6 +7,7 @@ mod diagnostics;
 mod lexer;
 mod modules;
 mod native;
+mod optimize;
 mod parser;
 
 use std::io::IsTerminal;
@@ -124,7 +125,7 @@ fn compile(path: &Path, test_mode: bool, target: Target) -> Output {
         eprintln!("error: could not compile `{file}` ({n} error{})", if n == 1 { "" } else { "s" });
         exit(1);
     };
-    let (program, runtime) = match loaded {
+    let (mut program, runtime) = match loaded {
         Ok(loaded) => loaded,
         Err(Ok(diags)) => report(&diags),
         Err(Err(message)) => die(&message),
@@ -133,6 +134,7 @@ fn compile(path: &Path, test_mode: bool, target: Target) -> Output {
         Ok(analysis) => analysis,
         Err(diags) => report(&diags),
     };
+    optimize::optimize(&mut program);
     match target {
         Target::Js => Output::Js(codegen_js::generate(
             &program,
@@ -202,7 +204,10 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     {
         use std::os::unix::process::ExitStatusExt;
         if let Some(signal) = status.signal() {
-            eprintln!("fatal: the program was killed by signal {signal}");
+            // 13 is SIGPIPE: the reader of the output went away (`... | head`).
+            if signal != 13 {
+                eprintln!("fatal: the program was killed by signal {signal}");
+            }
             return 128 + signal;
         }
     }
