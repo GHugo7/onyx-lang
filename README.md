@@ -165,6 +165,17 @@ fn main() {
 }
 ```
 
+### Modules
+
+```onyx
+import "lib/geometry" as geo
+
+fn main() {
+    var p = geo.Point{x: 3, y: 4}
+    print(geo.distance(p, geo.origin()))
+}
+```
+
 ### Built-in tests
 
 ```onyx
@@ -195,7 +206,8 @@ cargo build
 cargo test        # runs every program in tests/ and every example in the docs
 ```
 
-The pipeline is `lexer.rs` → `parser.rs` → `checker.rs` → `codegen_js.rs`,
+The pipeline is `lexer.rs` → `parser.rs` → `modules.rs` (imports) →
+`checker.rs` → `codegen_js.rs`,
 with the JavaScript runtime in `src/runtime.js`. To add a test, drop a `.ox`
 file and its expected `.out` in `tests/run`, or a program that must be rejected
 in `tests/errors` with `// error: E....` on its first line.

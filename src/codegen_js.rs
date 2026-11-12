@@ -2,13 +2,12 @@
 
 use crate::ast::*;
 use crate::checker::{fn_key, lambda_key, method_key, Analysis, CallKind, Recv, Type};
-use crate::diagnostics::line_col;
+use crate::diagnostics::SourceMap;
 use std::collections::HashMap;
 
 pub struct Options<'a> {
-    /// File name shown in `expect` failures.
-    pub file: &'a str,
-    pub src: &'a str,
+    /// Used to report the file and line of a failed `expect`.
+    pub sources: &'a SourceMap,
     /// Emit the `check` blocks and run them instead of `main`.
     pub test_mode: bool,
 }
@@ -29,7 +28,8 @@ fn js_name(name: &str) -> String {
     if JS_RESERVED.contains(&name) {
         format!("{name}$")
     } else {
-        name.to_string()
+        // Names from imported modules look like `module.name`.
+        name.replace(['.', '~'], "$")
     }
 }
 
@@ -176,6 +176,7 @@ impl<'a> Gen<'a> {
     fn strukt(&mut self, s: &StructDecl) {
         self.line(&format!("class {} {{", js_name(&s.name)));
         self.indent += 1;
+        self.line(&format!("static $name = {};", js_string(&s.name)));
         let params: Vec<String> = (0..s.fields.len()).map(|i| format!("${i}")).collect();
         self.line(&format!("constructor({}) {{", params.join(", ")));
         self.indent += 1;
@@ -633,9 +634,11 @@ impl<'a> Gen<'a> {
             }
             "str" => return self.to_str(&args[0]),
             "expect" => {
-                let (line, _) = line_col(self.opts.src, e.span.start);
+                let loc = self.opts.sources.locate(e.span.start);
+                let file = loc.file.rsplit(['/', '\\']).next().unwrap_or(loc.file);
+                let place = format!("{file}:{}", loc.line);
                 let cond = self.expr(&args[0]);
-                return format!("$rt.expect({cond}, {})", js_string(&format!("{}:{line}", self.opts.file)));
+                return format!("$rt.expect({cond}, {})", js_string(&place));
             }
             _ => {}
         }

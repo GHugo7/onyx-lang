@@ -10,5 +10,6 @@ in it is compiled by the test suite, so the code here always works.
 5. [Error handling](05-error-handling.md)
 6. [Concurrency](06-concurrency.md)
 7. [Testing](07-testing.md)
+8. [Modules](08-modules.md)
 
 See also the [standard library reference](../stdlib.md).

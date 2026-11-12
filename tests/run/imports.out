@@ -1,0 +1,12 @@
+42 2.25 3.14159
+my own origin geometry.Point{x: 0, y: 0} 0
+geometry.Point{x: 3, y: 4} geometry.Point{x: 4, y: 5} 5.0
+2
+3.14159
+4.0
+3.14159
+created: 2
+reset: 0
+8 [2, 4] 15
+2.0 0.0
+2

@@ -54,3 +54,5 @@ check "half rejects odd numbers" {
     expect((half(8) or -1) == 4)
 }
 ```
+
+Next: [Modules](08-modules.md)

@@ -16,6 +16,8 @@ pub enum Item {
     Global(Stmt),
     /// A `check "name" { ... }` test block.
     Check { name: String, body: Block },
+    /// `import "path"` or `import "path" as alias`.
+    Import { path: String, alias: Option<String>, span: Span },
 }
 
 #[derive(Debug, Clone)]

@@ -35,6 +35,7 @@ pub enum Tok {
     Fork,
     Chan,
     Check,
+    Import,
     True,
     False,
     // Punctuation
@@ -107,6 +108,7 @@ impl Tok {
             Tok::Fork => "fork",
             Tok::Chan => "chan",
             Tok::Check => "check",
+            Tok::Import => "import",
             Tok::True => "true",
             Tok::False => "false",
             Tok::LParen => "(",
@@ -176,6 +178,7 @@ fn keyword(word: &str) -> Option<Tok> {
         "fork" => Tok::Fork,
         "chan" => Tok::Chan,
         "check" => Tok::Check,
+        "import" => Tok::Import,
         "true" => Tok::True,
         "false" => Tok::False,
         _ => return None,

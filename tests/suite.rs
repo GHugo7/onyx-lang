@@ -54,7 +54,9 @@ fn invalid_programs_are_rejected_with_the_right_code() {
 
 #[test]
 fn examples_compile_and_their_checks_pass() {
-    for file in programs("examples") {
+    let mut files = programs("examples");
+    files.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/shop/main.ox"));
+    for file in files {
         let output = Command::new(ONYX).arg("check").arg(&file).output().unwrap();
         assert!(output.status.success(), "{}: {}", file.display(), String::from_utf8_lossy(&output.stderr));
         let output = Command::new(ONYX).arg("test").arg(&file).output().unwrap();
@@ -110,7 +112,8 @@ fn documentation_examples_compile() {
         let text = std::fs::read_to_string(&file).unwrap();
         for (i, block) in text.split("```onyx\n").skip(1).enumerate() {
             let code = block.split("```").next().unwrap();
-            if !code.contains("fn main(") {
+            // Only complete, single-file programs can be checked on their own.
+            if !code.contains("fn main(") || code.contains("import \"") {
                 continue;
             }
             let path = dir.join(format!("snippet{checked}.ox"));

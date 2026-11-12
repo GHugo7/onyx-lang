@@ -5,6 +5,7 @@ mod checker;
 mod codegen_js;
 mod diagnostics;
 mod lexer;
+mod modules;
 mod parser;
 
 use std::io::IsTerminal;
@@ -65,30 +66,28 @@ fn source_arg(args: &[String]) -> PathBuf {
 
 /// Compiles a source file to JavaScript, printing diagnostics and exiting on error.
 fn compile(path: &Path, test_mode: bool) -> String {
-    let src = match std::fs::read_to_string(path) {
-        Ok(src) => src,
-        Err(e) => die(&format!("cannot read `{}`: {e}", path.display())),
-    };
     let file = path.to_string_lossy();
     let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    let mut sources = diagnostics::SourceMap::default();
+    let loaded = modules::load(path, &mut sources);
     let report = |diags: &[diagnostics::Diagnostic]| -> ! {
         for d in diags {
-            eprintln!("{}", diagnostics::render(d, &file, &src, color));
+            eprintln!("{}", diagnostics::render(d, &sources, color));
         }
         let n = diags.len();
         eprintln!("error: could not compile `{file}` ({n} error{})", if n == 1 { "" } else { "s" });
         exit(1);
     };
-    let program = match parser::parse(&src) {
+    let program = match loaded {
         Ok(program) => program,
-        Err(d) => report(&[d]),
+        Err(Ok(diags)) => report(&diags),
+        Err(Err(message)) => die(&message),
     };
-    let analysis = match checker::check(&program, &src, !test_mode) {
+    let analysis = match checker::check(&program, &sources.text, !test_mode) {
         Ok(analysis) => analysis,
         Err(diags) => report(&diags),
     };
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    codegen_js::generate(&program, &analysis, &codegen_js::Options { file: &name, src: &src, test_mode })
+    codegen_js::generate(&program, &analysis, &codegen_js::Options { sources: &sources, test_mode })
 }
 
 fn check_target(args: &[String]) -> Vec<String> {

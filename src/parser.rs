@@ -16,14 +16,16 @@ pub struct Parser<'a> {
     no_struct: bool,
 }
 
-pub fn parse(src: &str) -> PResult<Program> {
-    let toks = lex(src, 0, src.len())?;
-    let mut p = Parser { src, toks, pos: 0, next_id: 0, no_struct: false };
+/// Parses the file stored at `src[start..end]`. Expression ids start at
+/// `first_id`; the next free id is returned so that ids stay unique across files.
+pub fn parse(src: &str, start: usize, end: usize, first_id: usize) -> PResult<(Program, usize)> {
+    let toks = lex(src, start, end)?;
+    let mut p = Parser { src, toks, pos: 0, next_id: first_id, no_struct: false };
     let mut items = Vec::new();
     while p.peek() != &Tok::Eof {
         items.push(p.item()?);
     }
-    Ok(Program { items })
+    Ok((Program { items }, p.next_id))
 }
 
 impl<'a> Parser<'a> {
@@ -104,6 +106,29 @@ impl<'a> Parser<'a> {
             Tok::Struct => self.struct_decl(),
             Tok::Interface => self.interface_decl(),
             Tok::Var | Tok::Const => Ok(Item::Global(self.let_stmt()?)),
+            Tok::Import => {
+                let start = self.advance().span;
+                let path = match self.peek().clone() {
+                    Tok::Str(pieces) => {
+                        self.advance();
+                        match pieces.as_slice() {
+                            [StrPiece::Lit(s)] if !s.is_empty() => s.clone(),
+                            _ => return Err(Diagnostic::new("E0003", "an import path must be a plain string", self.prev_span())),
+                        }
+                    }
+                    _ => return self.unexpected("a file path, like `import \"utils\"`"),
+                };
+                let mut span = start.to(self.prev_span());
+                let alias = if matches!(self.peek(), Tok::Ident(word) if word == "as") && !self.nl_before() {
+                    self.advance();
+                    let (name, name_span) = self.ident("a name for the module")?;
+                    span = span.to(name_span);
+                    Some(name)
+                } else {
+                    None
+                };
+                Ok(Item::Import { path, alias, span })
+            }
             Tok::Check => {
                 self.advance();
                 let name = match self.peek().clone() {
@@ -135,7 +160,7 @@ impl<'a> Parser<'a> {
                 self.span(),
             )
             .label("not allowed at the top level")
-            .help("only `fn`, `struct`, `interface`, `var`, `const` and `check` can appear at the top level; put statements inside `fn main() { ... }`")),
+            .help("only `import`, `fn`, `struct`, `interface`, `var`, `const` and `check` can appear at the top level; put statements inside `fn main() { ... }`")),
         }
     }
 
@@ -290,6 +315,12 @@ impl<'a> Parser<'a> {
                         kind: TypeKind::Map(Box::new(key), Box::new(value)),
                         span: start.to(self.prev_span()),
                     });
+                }
+                // `module.Type`
+                if self.peek() == &Tok::Dot && matches!(self.peek_at(1), Tok::Ident(_)) {
+                    self.advance();
+                    let (item, item_span) = self.ident("a type name")?;
+                    return Ok(TypeExpr { kind: TypeKind::Named(format!("{name}.{item}")), span: start.to(item_span) });
                 }
                 Ok(TypeExpr { kind: TypeKind::Named(name), span: start })
             }
@@ -573,6 +604,13 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let (name, name_span) = self.ident("a field or method name")?;
                     let span = e.span.to(name_span);
+                    // `module.Struct{...}`
+                    if let ExprKind::Ident(module) = &e.kind {
+                        if self.at_struct_literal() {
+                            e = self.struct_literal(format!("{module}.{name}"), span)?;
+                            continue;
+                        }
+                    }
                     e = self.mk(ExprKind::Field { obj: Box::new(e), name, name_span }, span);
                 }
                 Tok::Question if !self.nl_before() => {

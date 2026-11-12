@@ -37,7 +37,7 @@ const $rt = (() => {
     if (typeof v === "function") return "fn";
     if (v === undefined) return "void";
     const fields = Object.keys(v).map((k) => k + ": " + repr(v[k]));
-    return v.constructor.name + "{" + fields.join(", ") + "}";
+    return (v.constructor.$name || v.constructor.name) + "{" + fields.join(", ") + "}";
   };
   const str = (v) => (typeof v === "string" ? v : repr(v));
   const fstr = (x) => (Number.isInteger(x) ? x.toFixed(1) : String(x));

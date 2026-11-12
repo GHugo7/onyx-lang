@@ -38,8 +38,59 @@ impl Diagnostic {
     }
 }
 
+/// All the source files of a program, stored back to back in one buffer so
+/// that a `Span` (a pair of offsets into that buffer) also identifies its file.
+#[derive(Default)]
+pub struct SourceMap {
+    pub text: String,
+    files: Vec<SourceFile>,
+}
+
+struct SourceFile {
+    name: String,
+    start: usize,
+    end: usize,
+}
+
+pub struct Location<'a> {
+    pub file: &'a str,
+    /// The text of that file only.
+    pub text: &'a str,
+    pub line: usize,
+    pub col: usize,
+    /// Offset of the location inside `text`.
+    pub offset: usize,
+}
+
+impl SourceMap {
+    /// Adds a file and returns its byte range in the buffer.
+    pub fn add(&mut self, name: String, text: &str) -> (usize, usize) {
+        if !self.text.is_empty() {
+            self.text.push('\n');
+        }
+        let start = self.text.len();
+        self.text.push_str(text);
+        let end = self.text.len();
+        self.files.push(SourceFile { name, start, end });
+        (start, end)
+    }
+
+    pub fn locate(&self, offset: usize) -> Location<'_> {
+        let file = self
+            .files
+            .iter()
+            .find(|f| offset <= f.end)
+            .or(self.files.last())
+            .expect("no source files");
+        let text = &self.text[file.start..file.end];
+        let offset = offset.clamp(file.start, file.end) - file.start;
+        let (line, col) = line_col(text, offset);
+        Location { file: &file.name, text, line, col, offset }
+    }
+}
+
 /// Returns the 1-based (line, column) of a byte offset.
-pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
+fn line_col(src: &str, offset: usize) -> (usize, usize) {
     let offset = offset.min(src.len());
     let mut line = 1;
     let mut line_start = 0;
@@ -56,15 +107,17 @@ pub fn line_col(src: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
-pub fn render(d: &Diagnostic, file: &str, src: &str, color: bool) -> String {
+pub fn render(d: &Diagnostic, sources: &SourceMap, color: bool) -> String {
     let (red, blue, bold, reset) =
         if color { ("\x1b[1;31m", "\x1b[1;34m", "\x1b[1m", "\x1b[0m") } else { ("", "", "", "") };
-    let (line, col) = line_col(src, d.span.start);
+    let loc = sources.locate(d.span.start);
+    let (file, src, line, col) = (loc.file, loc.text, loc.line, loc.col);
     let line_text = src.lines().nth(line - 1).unwrap_or("");
+    let span_len = d.span.end.saturating_sub(d.span.start);
     let gutter = " ".repeat(line.to_string().len());
     // Underline only the part of the span that sits on the first line.
     let span_chars = src
-        .get(d.span.start..d.span.end.min(src.len()))
+        .get(loc.offset..(loc.offset + span_len).min(src.len()))
         .map(|s| s.split('\n').next().unwrap_or("").chars().count())
         .unwrap_or(1)
         .max(1);
@@ -119,6 +172,9 @@ pub fn explain(code: &str) -> Option<&'static str> {
         "E0204" => "When a `catch` block is used to produce a value, it must either leave\n(return, fail, break, continue) or end with an expression of the right type.",
         "E0205" => "`catch` blocks may contain statements such as `return`, so they are only\nallowed directly in a `var`, an assignment, a `return` or as a statement.\nUse `or` inside larger expressions.",
         "E0206" => "The `!` marker is only valid on a function's return type.",
+        "E0400" => "An `import` names a file that does not exist or cannot be read.\n\nImport paths are relative to the file that contains the import, and the\n`.ox` extension is optional:\n\n    import \"utils\"            // ./utils.ox\n    import \"lib/geometry\"     // ./lib/geometry.ox",
+        "E0401" => "A module was asked for something it does not define, or for a private\nname. After `import \"utils\"`, the functions, variables and types of\nutils.ox are used as `utils.name`. Names starting with `_` stay private to\ntheir file.",
+        "E0402" => "Every import needs a distinct, valid name. By default it is the file name;\nchoose another one with `as`:\n\n    import \"lib/string-utils\" as strings",
         "E0300" => "`<-` sends to and receives from channels only.",
         _ => return None,
     })

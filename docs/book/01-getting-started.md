@@ -29,8 +29,8 @@ Run it:
 onyx run hello.ox
 ```
 
-Every program starts in `fn main()`. Only declarations (`fn`, `struct`,
-`interface`, `var`, `const`, `check`) may appear at the top level of a file.
+Every program starts in `fn main()`. Only declarations (`import`, `fn`,
+`struct`, `interface`, `var`, `const`, `check`) may appear at the top level of a file.
 
 ## The commands
 
