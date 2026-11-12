@@ -105,11 +105,16 @@ pub fn generate(program: &Program, an: &Analysis, opts: &Options) -> String {
             g.function(&header, f);
         }
     }
-    for item in &program.items {
-        if let Item::Global(Stmt { kind: StmtKind::Let { name, init, .. }, .. }) = item {
-            let value = g.expr(init);
-            g.line(&format!("let {} = {value};", js_name(name)));
-        }
+    let globals: Vec<String> = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Global(Stmt { kind: StmtKind::Let { name, .. }, .. }) => Some(js_name(name)),
+            _ => None,
+        })
+        .collect();
+    if !globals.is_empty() {
+        g.line(&format!("let {};", globals.join(", ")));
     }
     if opts.test_mode {
         g.line("const $tests = [];");
@@ -120,10 +125,19 @@ pub fn generate(program: &Program, an: &Analysis, opts: &Options) -> String {
                 g.line("}]);");
             }
         }
-        g.line("await $rt.runTests($tests);");
-    } else {
-        g.line("await $rt.run(main);");
     }
+    // Everything that runs is inside `$rt.run`, which reports failures properly.
+    g.line("await $rt.run(async () => {");
+    g.indent += 1;
+    for item in &program.items {
+        if let Item::Global(Stmt { kind: StmtKind::Let { name, init, .. }, .. }) = item {
+            let value = g.expr(init);
+            g.line(&format!("{} = {value};", js_name(name)));
+        }
+    }
+    g.line(if opts.test_mode { "await $rt.runTests($tests);" } else { "await main();" });
+    g.indent -= 1;
+    g.line("});");
     g.out.push_str("})();\n");
     g.out
 }
@@ -456,7 +470,10 @@ impl<'a> Gen<'a> {
 
     fn expr(&mut self, e: &Expr) -> String {
         match &e.kind {
+            // Parentheses keep a negative literal from merging with a preceding `-`.
+            ExprKind::Int(n) if *n < 0 => format!("({n})"),
             ExprKind::Int(n) => n.to_string(),
+            ExprKind::Float(n) if *n < 0.0 => format!("({n:?})"),
             ExprKind::Float(n) => format!("{n:?}"),
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::Str(parts) => {

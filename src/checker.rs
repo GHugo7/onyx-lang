@@ -201,10 +201,22 @@ struct FnCtx {
     loop_depth: u32,
 }
 
+/// What the checker records about each body of code (a function, a method,
+/// a lambda, a `fork` block, the initialiser of a top-level variable).
 #[derive(Default)]
 struct AsyncInfo {
+    /// Contains an operation that waits (channel, sleep, ...).
     direct: bool,
+    /// Functions and methods it calls directly.
     calls: Vec<String>,
+    /// Top-level variables it reads or writes.
+    globals: Vec<String>,
+    /// Bodies that run as part of this one without being called (`fork` blocks).
+    inline: Vec<String>,
+    /// Methods called through an interface: any struct's method of that name may run.
+    interface_calls: Vec<String>,
+    /// Calls a function value: any function that is used as a value may run.
+    dynamic: bool,
 }
 
 struct Checker<'a> {
@@ -220,6 +232,13 @@ struct Checker<'a> {
     /// The one `catch` expression allowed at the current statement: (id, needs a value).
     catch_slot: Option<(usize, bool)>,
     async_info: HashMap<String, AsyncInfo>,
+    /// Functions and lambdas that are stored or passed around as values.
+    escaping: Vec<String>,
+    /// Every top-level variable, with its position in initialisation order.
+    global_names: HashMap<String, usize>,
+    /// (name, span of the initialiser) of the top-level variables checked so far.
+    global_inits: Vec<(String, Span)>,
+    forks: usize,
     /// Byte range of the native runtime's source; `__` names are only visible there.
     runtime: Option<(usize, usize)>,
     an: Analysis,
@@ -242,6 +261,10 @@ pub fn check(
         handling: HashSet::new(),
         catch_slot: None,
         async_info: HashMap::new(),
+        escaping: Vec::new(),
+        global_names: HashMap::new(),
+        global_inits: Vec::new(),
+        forks: 0,
         runtime,
         an: Analysis::default(),
     };
@@ -296,6 +319,7 @@ impl<'a> Checker<'a> {
                 Item::Interface(i) => (&i.name, i.name_span),
                 _ => continue,
             };
+            self.check_reserved(name, span);
             if BUILTIN_TYPES.contains(&name.as_str()) {
                 self.err(Diagnostic::new("E0103", format!("`{name}` is a built-in type"), span));
             } else if self.structs.contains_key(name) || self.interfaces.contains_key(name) {
@@ -353,6 +377,7 @@ impl<'a> Checker<'a> {
                 }
                 Item::Fn(f) => {
                     let sig = self.signature(&f.params, &f.ret, f.fallible);
+                    self.check_reserved(&f.name, f.name_span);
                     if is_builtin(&f.name) {
                         self.err(Diagnostic::new("E0103", format!("`{}` is a built-in function and cannot be redefined", f.name), f.name_span));
                     } else if self.structs.contains_key(&f.name) || self.interfaces.contains_key(&f.name) {
@@ -368,14 +393,28 @@ impl<'a> Checker<'a> {
             }
         }
 
-        // 3. Globals, in order.
-        self.push_ctx(CtxKind::Global, "global".into(), Type::Void, false);
-        for item in &program.items {
-            if let Item::Global(stmt) = item {
-                self.stmt(stmt);
-            }
+        // 3. Top-level variables, in the order in which they get their values.
+        let globals: Vec<(&Stmt, &String, &Expr, Span)> = program
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Global(stmt) => match &stmt.kind {
+                    StmtKind::Let { name, init, name_span, .. } => Some((stmt, name, init, *name_span)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        for (i, (_, name, _, _)) in globals.iter().enumerate() {
+            self.global_names.entry((*name).clone()).or_insert(i);
         }
-        self.ctx.pop();
+        for (stmt, name, init, name_span) in globals {
+            self.check_reserved(name, name_span);
+            self.global_inits.push((name.clone(), init.span));
+            self.push_ctx(CtxKind::Global, format!("global:{name}"), Type::Void, false);
+            self.stmt(stmt);
+            self.ctx.pop();
+        }
 
         // 4. Bodies.
         for item in &program.items {
@@ -435,6 +474,107 @@ impl<'a> Checker<'a> {
             }
         }
         self.an.async_keys = set;
+
+        // 7. No top-level variable may be used before it has its value.
+        self.check_initialization_order();
+    }
+
+    /// Names starting with two underscores belong to the runtime.
+    fn check_reserved(&mut self, name: &str, span: Span) {
+        let own_name = name.rsplit('.').next().unwrap_or(name);
+        let in_runtime = self.runtime.is_some_and(|(start, end)| span.start >= start && span.end <= end);
+        if own_name.starts_with("__") && !in_runtime {
+            self.err(Diagnostic::new("E0103", format!("the name `{own_name}` is reserved"), span)
+                .help("names starting with two underscores are reserved for the Onyx runtime; one underscore makes a name private to its file"));
+        }
+    }
+
+    /// Top-level variables get their values one after the other, imported
+    /// files first. An initialiser may call functions, and those functions may
+    /// use other top-level variables: this finds the ones that would be used
+    /// too early. The search follows every call that *could* happen, so it
+    /// can reject a program that would in fact have been fine.
+    fn check_initialization_order(&mut self) {
+        let mut methods_named: HashMap<&str, Vec<String>> = HashMap::new();
+        for (strukt, info) in &self.structs {
+            for method in info.methods.keys() {
+                methods_named.entry(method.as_str()).or_default().push(method_key(strukt, method));
+            }
+        }
+        let describe = |key: &str| -> Option<String> {
+            if let Some(name) = key.strip_prefix("fn:") {
+                Some(format!("`{name}`"))
+            } else if let Some(name) = key.strip_prefix("m:") {
+                Some(format!("`{name}`"))
+            } else if key.starts_with("lambda:") {
+                Some("a lambda".to_string())
+            } else {
+                None
+            }
+        };
+
+        let mut errors = Vec::new();
+        for (i, (name, init_span)) in self.global_inits.iter().enumerate() {
+            let start = format!("global:{name}");
+            let mut parent: HashMap<String, String> = HashMap::new();
+            let mut seen: HashSet<String> = HashSet::from([start.clone()]);
+            let mut queue = std::collections::VecDeque::from([start.clone()]);
+            'search: while let Some(key) = queue.pop_front() {
+                let Some(info) = self.async_info.get(&key) else { continue };
+                for used in &info.globals {
+                    if self.global_names.get(used).is_some_and(|&j| j >= i) {
+                        // The chain of calls that leads from the initialiser to the use.
+                        let mut chain = Vec::new();
+                        let mut at = key.clone();
+                        while at != start {
+                            chain.extend(describe(&at));
+                            at = parent[&at].clone();
+                        }
+                        chain.reverse();
+                        errors.push((name.clone(), *init_span, used.clone(), chain));
+                        break 'search;
+                    }
+                }
+                let mut next: Vec<&String> = info.calls.iter().chain(info.inline.iter()).collect();
+                for method in &info.interface_calls {
+                    if let Some(keys) = methods_named.get(method.as_str()) {
+                        next.extend(keys);
+                    }
+                }
+                if info.dynamic {
+                    next.extend(self.escaping.iter());
+                }
+                for callee in next {
+                    if seen.insert(callee.clone()) {
+                        parent.insert(callee.clone(), key.clone());
+                        queue.push_back(callee.clone());
+                    }
+                }
+            }
+        }
+
+        for (name, span, used, chain) in errors {
+            let via = if chain.is_empty() { String::new() } else { format!(" through {}", chain.join(", then ")) };
+            let (message, label) = if used == name {
+                (
+                    format!("`{name}` is used while its own value is being computed"),
+                    format!("this uses `{name}`{via}"),
+                )
+            } else {
+                (
+                    format!("`{used}` may be used before it has a value"),
+                    format!("this uses `{used}`{via}, but `{used}` gets its value later"),
+                )
+            };
+            let module = |n: &str| n.rsplit_once('.').map(|(m, _)| m.to_string()).unwrap_or_default();
+            let mut help = format!(
+                "top-level variables get their values from top to bottom, imported files first; declare `{used}` before `{name}`, or compute `{name}` inside a function"
+            );
+            if module(&used) != module(&name) {
+                help.push_str(". These two are in files that import each other, so the file that is run decides which comes first");
+            }
+            self.err(Diagnostic::new("E0118", message, span).label(label).help(help));
+        }
     }
 
     fn signature(&mut self, params: &[Param], ret: &Option<TypeExpr>, fallible: bool) -> Rc<FnSig> {
@@ -553,6 +693,35 @@ impl<'a> Checker<'a> {
     fn add_call(&mut self, callee: String) {
         let key = self.cur().key.clone();
         self.async_info.entry(key).or_default().calls.push(callee);
+    }
+
+    /// Records that the current body uses `name`, if it is a top-level variable.
+    fn use_global(&mut self, name: &str) {
+        if self.scopes.iter().rposition(|s| s.contains_key(name)) == Some(0) {
+            let key = self.cur().key.clone();
+            self.async_info.entry(key).or_default().globals.push(name.to_string());
+        }
+    }
+
+    /// A function given to `map`, `filter` or `sort_by` is called right there.
+    fn callback(&mut self, arg: &Expr) {
+        let key = match &arg.kind {
+            ExprKind::Lambda { .. } => Some(lambda_key(arg.id)),
+            ExprKind::Ident(name) if self.lookup(name).is_none() && self.fns.contains_key(name) => Some(fn_key(name)),
+            _ => None,
+        };
+        match key {
+            // Checking the argument registered it as a value that may be called
+            // from anywhere; it is not: it only runs here.
+            Some(key) if self.escaping.last() == Some(&key) => {
+                self.escaping.pop();
+                self.add_call(key);
+            }
+            _ => {
+                let current = self.cur().key.clone();
+                self.async_info.entry(current).or_default().dynamic = true;
+            }
+        }
     }
 
     fn declare(&mut self, name: &str, ty: Type, mutable: bool, span: Span) {
@@ -748,7 +917,12 @@ impl<'a> Checker<'a> {
                 }
             }
             StmtKind::Fork(body) => {
-                self.push_ctx(CtxKind::Fork, "fork".into(), Type::Void, false);
+                // The block starts running right away, as part of the enclosing body.
+                self.forks += 1;
+                let key = format!("fork:{}", self.forks);
+                let parent = self.cur().key.clone();
+                self.async_info.entry(parent).or_default().inline.push(key.clone());
+                self.push_ctx(CtxKind::Fork, key, Type::Void, false);
                 self.block(body);
                 self.ctx.pop();
             }
@@ -778,6 +952,7 @@ impl<'a> Checker<'a> {
         match &target.kind {
             ExprKind::Ident(name) => match self.lookup(name) {
                 Some(var) => {
+                    self.use_global(name);
                     if !var.mutable {
                         self.err(Diagnostic::new("E0108", format!("cannot assign to `{name}`"), target.span)
                             .label("this is a constant")
@@ -831,12 +1006,18 @@ impl<'a> Checker<'a> {
             }
             ExprKind::Ident(name) => {
                 if let Some(var) = self.lookup(name) {
+                    self.use_global(name);
                     return var.ty;
                 }
-                if let Some(sig) = self.fns.get(name) {
-                    return Type::Fn(sig.clone());
+                if let Some(sig) = self.fns.get(name).cloned() {
+                    self.escaping.push(fn_key(name));
+                    return Type::Fn(sig);
                 }
-                let d = if is_builtin(name) {
+                let d = if self.global_names.contains_key(name) {
+                    Diagnostic::new("E0118", format!("`{name}` is used before it has a value"), e.span)
+                        .label(format!("`{name}` is declared further down"))
+                        .help(format!("top-level variables get their values from top to bottom, imported files first; move the declaration of `{name}` above this line"))
+                } else if is_builtin(name) {
                     Diagnostic::new("E0100", format!("built-in function `{name}` can only be called"), e.span)
                         .help(format!("write `{name}(...)`, or wrap it in a lambda"))
                 } else if self.structs.contains_key(name) || self.interfaces.contains_key(name) {
@@ -1041,6 +1222,7 @@ impl<'a> Checker<'a> {
                 }
                 self.scopes.pop();
                 self.ctx.pop();
+                self.escaping.push(lambda_key(e.id));
                 Type::Fn(sig)
             }
             ExprKind::Try(inner) => {
@@ -1309,7 +1491,7 @@ impl<'a> Checker<'a> {
                             return (sig.ret.clone(), sig.fallible);
                         }
                         if let Some((_, Type::Fn(sig))) = info.fields.iter().find(|(n, _)| n == name).cloned() {
-                            return self.dynamic_call(e, &sig, args, name);
+                            return self.dynamic_call(e, &sig, args, name, false);
                         }
                         let mut names: Vec<&str> = info.methods.keys().map(|k| k.as_str()).collect();
                         names.sort();
@@ -1322,7 +1504,7 @@ impl<'a> Checker<'a> {
                     Type::Interface(i) => {
                         let sig = self.interfaces[i].methods.iter().find(|(n, _)| n == name).map(|(_, s)| s.clone());
                         if let Some(sig) = sig {
-                            return self.dynamic_call(e, &sig, args, name);
+                            return self.dynamic_call(e, &sig, args, name, true);
                         }
                         self.err(Diagnostic::new("E0106", format!("interface `{i}` has no method `{name}`"), *name_span));
                     }
@@ -1344,7 +1526,7 @@ impl<'a> Checker<'a> {
                 match callee_ty {
                     Type::Fn(sig) => {
                         let what = self.text(callee.span).to_string();
-                        self.dynamic_call(e, &sig, args, &what)
+                        self.dynamic_call(e, &sig, args, &what, false)
                     }
                     other => {
                         if !other.is_unknown() {
@@ -1361,10 +1543,26 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn dynamic_call(&mut self, e: &Expr, sig: &Rc<FnSig>, args: &[Expr], what: &str) -> (Type, bool) {
+    /// A call whose target is only known when the program runs: a function
+    /// value, or (`interface_method`) a method called through an interface.
+    fn dynamic_call(
+        &mut self,
+        e: &Expr,
+        sig: &Rc<FnSig>,
+        args: &[Expr],
+        what: &str,
+        interface_method: bool,
+    ) -> (Type, bool) {
         self.args(&sig.params, args, e, &format!("`{what}`"));
         self.an.calls.insert(e.id, CallKind::Dynamic);
         self.mark_async();
+        let key = self.cur().key.clone();
+        let info = self.async_info.entry(key).or_default();
+        if interface_method {
+            info.interface_calls.push(what.to_string());
+        } else {
+            info.dynamic = true;
+        }
         (sig.ret.clone(), sig.fallible)
     }
 
@@ -1506,6 +1704,7 @@ impl<'a> Checker<'a> {
                             return (Unknown, false);
                         }
                         let ft = self.expr(&args[0], None);
+                        self.callback(&args[0]);
                         let ret = match &ft {
                             Fn(sig) if sig.params.len() == 1 && !sig.fallible && self.assignable(&t, &sig.params[0]) => {
                                 sig.ret.clone()
@@ -1559,6 +1758,9 @@ impl<'a> Checker<'a> {
         match found {
             Some((kind, params, ret, fallible, is_async)) => {
                 self.args(&params, args, e, &format!("`{name}`"));
+                if kind == Recv::List && name == "filter" && args.len() == 1 {
+                    self.callback(&args[0]);
+                }
                 self.an.calls.insert(e.id, CallKind::BuiltinMethod(kind, name.to_string()));
                 if is_async {
                     self.mark_async();
