@@ -67,10 +67,10 @@ fn runtime_failures_set_the_exit_code() {
     let dir = std::env::temp_dir().join(format!("onyx-suite-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let cases = [
-        ("fn main() {\n    let xs = [1]\n    print(xs[3])\n}\n", 2, "panic: index out of bounds"),
-        ("fn main() {\n    let z = 0\n    print(1 / z)\n}\n", 2, "panic: division by zero"),
+        ("fn main() {\n    var xs = [1]\n    print(xs[3])\n}\n", 2, "panic: index out of bounds"),
+        ("fn main() {\n    var z = 0\n    print(1 / z)\n}\n", 2, "panic: division by zero"),
         ("fn main() -> void! {\n    fail \"boom\"\n}\n", 1, "error: boom"),
-        ("fn main() {\n    let ch = chan<int>()\n    print(<-ch)\n}\n", 2, "deadlock"),
+        ("fn main() {\n    var ch = chan<int>()\n    print(<-ch)\n}\n", 2, "deadlock"),
         ("fn main() {\n    exit(7)\n}\n", 7, ""),
     ];
     for (i, (src, code, message)) in cases.iter().enumerate() {

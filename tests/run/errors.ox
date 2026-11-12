@@ -6,7 +6,7 @@ fn half(n: int) -> int! {
 }
 
 fn quarter(n: int) -> int! {
-    let h = half(n)?
+    var h = half(n)?
     return half(h)?
 }
 
@@ -17,7 +17,7 @@ fn check_positive(n: int) -> void! {
 }
 
 fn describe(n: int) -> string {
-    let q = quarter(n) catch err {
+    var q = quarter(n) catch err {
         return "cannot quarter {n}: {err.message}"
     }
     return "{n} / 4 = {q}"
@@ -25,7 +25,7 @@ fn describe(n: int) -> string {
 
 fn first_even(xs: [int]) -> int! {
     for x in xs {
-        let h = half(x) catch e {
+        var h = half(x) catch e {
             continue
         }
         return h * 2
@@ -34,7 +34,7 @@ fn first_even(xs: [int]) -> int! {
 }
 
 fn rethrow(n: int) -> int! {
-    let v = half(n) catch err {
+    var v = half(n) catch err {
         fail err
     }
     return v
@@ -45,14 +45,14 @@ fn main() {
     print(describe(8), "|", describe(6), "|", describe(3))
 
     // catch producing a value
-    let a = half(9) catch err {
+    var a = half(9) catch err {
         print("recovering from:", err)
         0
     }
     print(a)
 
     // catch on assignment and as a statement
-    let b = 1
+    var b = 1
     b = half(5) catch e { 100 }
     b += half(4) catch e { 0 }
     print(b)
@@ -68,7 +68,7 @@ fn main() {
     print(1 + (half(4) or 0) * 2)
 
     // fallible lambdas
-    let safe_div = fn(a: int, b: int) -> int! {
+    var safe_div = fn(a: int, b: int) -> int! {
         if b == 0 { fail "division by zero" }
         return a / b
     }

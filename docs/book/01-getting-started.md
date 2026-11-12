@@ -30,7 +30,7 @@ onyx run hello.ox
 ```
 
 Every program starts in `fn main()`. Only declarations (`fn`, `struct`,
-`interface`, `let`, `const`, `check`) may appear at the top level of a file.
+`interface`, `var`, `const`, `check`) may appear at the top level of a file.
 
 ## The commands
 
@@ -55,7 +55,7 @@ modified, and nothing else is written to disk unless you ask for it with
 // A comment. /* Block comments work too. */
 
 fn main() {
-    let total = 0                 // statements end at the end of the line
+    var total = 0                 // statements end at the end of the line
     for i in 0..5 {               // braces are required, parentheses are not
         if i % 2 == 0 {
             total += i

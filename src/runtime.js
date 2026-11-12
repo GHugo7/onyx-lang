@@ -162,6 +162,10 @@ const $rt = (() => {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   if (isNode) {
+    // The reader went away (e.g. `onyx run app.ox | head`): stop quietly.
+    process.stdout.on("error", (e) => {
+      if (e.code === "EPIPE") process.exit(0);
+    });
     process.on("beforeExit", () => {
       if (!finished) {
         console.error("fatal: deadlock: the program is waiting on a channel that nobody will ever use");

@@ -17,7 +17,7 @@ pub enum Tok {
     Ident(String),
     // Keywords
     Fn,
-    Let,
+    Var,
     Const,
     Struct,
     Interface,
@@ -89,7 +89,7 @@ impl Tok {
     fn text(&self) -> &'static str {
         match self {
             Tok::Fn => "fn",
-            Tok::Let => "let",
+            Tok::Var => "var",
             Tok::Const => "const",
             Tok::Struct => "struct",
             Tok::Interface => "interface",
@@ -158,7 +158,7 @@ pub struct Token {
 fn keyword(word: &str) -> Option<Tok> {
     Some(match word {
         "fn" => Tok::Fn,
-        "let" => Tok::Let,
+        "var" => Tok::Var,
         "const" => Tok::Const,
         "struct" => Tok::Struct,
         "interface" => Tok::Interface,

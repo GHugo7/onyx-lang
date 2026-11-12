@@ -13,16 +13,16 @@ struct Result {
 
 fn worker(id: int, jobs: chan<Job>, results: chan<Result>) {
     for job in jobs {
-        let start = now()
+        var start = now()
         sleep(job.size * 10)    // pretend to work
         results <- Result{job: job.id, worker: id, millis: now() - start}
     }
 }
 
 fn main() {
-    let jobs = chan<Job>()
-    let results = chan<Result>()
-    let job_count = 8
+    var jobs = chan<Job>()
+    var results = chan<Result>()
+    var job_count = 8
 
     // Start three workers. Each one waits for jobs on the same channel.
     for id in 1..4 {
@@ -38,10 +38,10 @@ fn main() {
         jobs.close()
     }
 
-    let start = now()
-    let per_worker: map<int, int> = {}
+    var start = now()
+    var per_worker: map<int, int> = {}
     for i in 0..job_count {
-        let r = <-results
+        var r = <-results
         per_worker[r.worker] = (per_worker.get(r.worker) or 0) + 1
         print("job {r.job} finished by worker {r.worker} in ~{r.millis / 10 * 10}ms")
     }

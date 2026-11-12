@@ -1,15 +1,15 @@
 # 2. Variables and types
 
-## let and const
+## var and const
 
-`let` declares a variable, `const` a value that never changes.
+`var` declares a variable, `const` a value that never changes.
 
 ```onyx
 const MAX_PLAYERS = 4
 
 fn main() {
-    let score = 10          // the type is inferred: int
-    let name: string = "Al" // or written explicitly
+    var score = 10          // the type is inferred: int
+    var name: string = "Al" // or written explicitly
     score = score + 5
     print("{name} has {score} of {MAX_PLAYERS}")
 }
@@ -33,8 +33,8 @@ explicit:
 
 ```onyx
 fn main() {
-    let n = 7
-    let half: float = n            // int -> float is automatic
+    var n = 7
+    var half: float = n            // int -> float is automatic
     print(half / 2)                // 3.5
     print(n / 2)                   // 3: dividing two ints gives an int
     print(int(3.9), round(3.9))    // 3 4
@@ -61,8 +61,8 @@ literal brace.
 
 ```onyx
 fn main() {
-    let name = "Sam"
-    let items = [1, 2, 3]
+    var name = "Sam"
+    var items = [1, 2, 3]
     print("{name} has {items.len()} items, twice that is {items.len() * 2}")
     print("JSON looks like \{\"a\": 1\}")
     print(name.upper(), name.len(), name.contains("a"))
@@ -75,12 +75,12 @@ A list holds values of one type and can grow.
 
 ```onyx
 fn main() {
-    let names = ["Ada", "Linus"]
+    var names = ["Ada", "Linus"]
     names.push("Grace")
     names[0] = "Alan"
     print(names, names.len(), names[2])
 
-    let scores: [int] = []       // an empty list needs a type
+    var scores: [int] = []       // an empty list needs a type
     scores.push(3)
 
     for name in names {
@@ -97,7 +97,7 @@ A map associates keys (`int`, `string` or `bool`) with values.
 
 ```onyx
 fn main() {
-    let ages = {"Ada": 36, "Linus": 54}
+    var ages = {"Ada": 36, "Linus": 54}
     ages["Grace"] = 85
     print(ages["Ada"], ages.has("Bob"), ages.len())
 
@@ -108,7 +108,7 @@ fn main() {
         print("{name} is {ages[name]}")
     }
 
-    let empty: map<string, int> = {}
+    var empty: map<string, int> = {}
     print(empty.len())
 }
 ```
@@ -117,7 +117,7 @@ fn main() {
 
 ```onyx
 fn main() {
-    let n = 7
+    var n = 7
     if n > 5 {
         print("big")
     } else if n > 2 {
@@ -126,7 +126,7 @@ fn main() {
         print("small")
     }
 
-    let i = 0
+    var i = 0
     while i < 3 {
         i += 1
     }

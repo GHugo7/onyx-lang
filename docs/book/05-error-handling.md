@@ -33,8 +33,8 @@ There are three ways to answer.
 
 ```onyx
 fn main() {
-    let port = parse_int("80a") or 8080
-    let config = read_file("config.txt") or "default config"
+    var port = parse_int("80a") or 8080
+    var config = read_file("config.txt") or "default config"
     print(port, config)
 }
 ```
@@ -49,13 +49,13 @@ The block receives the error. It must either leave (`return`, `fail`, `break`,
 
 ```onyx
 fn main() {
-    let text = read_file("notes.txt") catch err {
+    var text = read_file("notes.txt") catch err {
         print("no notes: {err}")
         return
     }
     print(text)
 
-    let count = parse_int(text) catch err {
+    var count = parse_int(text) catch err {
         print("not a number, using 1")
         1
     }
@@ -77,7 +77,7 @@ struct Config {
 }
 
 fn load(path: string) -> Config! {
-    let lines = read_file(path)?.split("\n")
+    var lines = read_file(path)?.split("\n")
     if lines.len() < 2 {
         fail "{path}: expected two lines"
     }
@@ -85,7 +85,7 @@ fn load(path: string) -> Config! {
 }
 
 fn main() -> void! {
-    let config = load("server.conf")?
+    var config = load("server.conf")?
     print(config)
 }
 ```

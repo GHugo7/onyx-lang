@@ -1,5 +1,5 @@
 // The classic first program.
 fn main() {
-    let name = "world"
+    var name = "world"
     print("Hello, {name}!")
 }

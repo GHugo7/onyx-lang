@@ -18,7 +18,7 @@ const RUNTIME: &str = include_str!("runtime.js");
 /// Names that would clash with JavaScript syntax or with globals the generated code uses.
 const JS_RESERVED: &[&str] = &[
     "arguments", "async", "await", "case", "class", "debugger", "default", "delete", "do", "enum",
-    "eval", "export", "extends", "finally", "function", "implements", "import", "instanceof",
+    "eval", "export", "extends", "finally", "function", "implements", "import", "instanceof", "let",
     "new", "null", "package", "private", "protected", "public", "static", "super", "switch",
     "this", "throw", "try", "typeof", "undefined", "var", "void", "with", "yield", "NaN",
     "Infinity", "Math", "Map", "Array", "Date", "Promise", "Object", "String", "Number",

@@ -1,5 +1,5 @@
 const LIMIT = 3
-let calls = 0
+var calls = 0
 
 fn add(a: int, b: int) -> int {
     calls += 1
@@ -25,16 +25,16 @@ fn main() {
     print(1 < 2, 2 <= 2, "a" < "b", 1 == 1.0, !true, true && false, true || false)
 
     // shadowing in nested scopes
-    let x = 1
+    var x = 1
     {
-        let x = x + 10
+        var x = x + 10
         print("inner", x)
     }
     print("outer", x)
 
     // while, break, continue
-    let i = 0
-    let seen: [int] = []
+    var i = 0
+    var seen: [int] = []
     while true {
         i += 1
         if i == 2 { continue }
@@ -44,15 +44,15 @@ fn main() {
     print(seen)
 
     // compound assignment
-    let n = 20
+    var n = 20
     n -= 5
     n *= 2
     n /= 4
     print(n)
-    let f = 1.0
+    var f = 1.0
     f /= 4
     print(f)
-    let s = "ab"
+    var s = "ab"
     s += "cd"
     print(s)
 
@@ -60,9 +60,9 @@ fn main() {
     print(add(1, 2), add(3, 4), "calls:", calls)
 
     // JavaScript reserved words are fine as names
-    let new = 1
-    let class = 2
-    let function = new + class
+    var new = 1
+    var class = 2
+    var function = new + class
     print(function)
 
     // escapes and nested interpolation

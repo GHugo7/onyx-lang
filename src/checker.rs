@@ -540,7 +540,7 @@ impl<'a> Checker<'a> {
         let scope = self.scopes.last_mut().unwrap();
         if scope.contains_key(name) {
             self.err(Diagnostic::new("E0103", format!("`{name}` is already defined in this scope"), span)
-                .help("pick another name, or assign to the existing variable without `let`"));
+                .help("pick another name, or assign to the existing variable without `var`"));
             return;
         }
         scope.insert(name.to_string(), Var { ty, mutable });
@@ -762,7 +762,7 @@ impl<'a> Checker<'a> {
                     if !var.mutable {
                         self.err(Diagnostic::new("E0108", format!("cannot assign to `{name}`"), target.span)
                             .label("this is a constant")
-                            .help(format!("declare it with `let {name} = ...` to make it changeable")));
+                            .help(format!("declare it with `var {name} = ...` to make it changeable")));
                     }
                     self.an.types.insert(target.id, var.ty.clone());
                     var.ty
@@ -845,7 +845,7 @@ impl<'a> Checker<'a> {
                         Some(t) => Type::List(Box::new(t)),
                         None => {
                             self.err(Diagnostic::new("E0110", "cannot infer the type of this empty list", e.span)
-                                .help("add a type annotation: `let items: [string] = []`"));
+                                .help("add a type annotation: `var items: [string] = []`"));
                             Type::List(Box::new(Type::Unknown))
                         }
                     };
@@ -863,7 +863,7 @@ impl<'a> Checker<'a> {
                         Some((k, v)) => Type::Map(Box::new(k), Box::new(v)),
                         None => {
                             self.err(Diagnostic::new("E0110", "cannot infer the type of this empty map", e.span)
-                                .help("add a type annotation: `let ages: map<string, int> = {}`"));
+                                .help("add a type annotation: `var ages: map<string, int> = {}`"));
                             Type::Map(Box::new(Type::Unknown), Box::new(Type::Unknown))
                         }
                     };
@@ -1064,7 +1064,7 @@ impl<'a> Checker<'a> {
                     Some((id, needs)) if id == e.id => needs,
                     _ => {
                         self.err(Diagnostic::new("E0205", "`catch` cannot be used inside a larger expression", e.span)
-                            .help("use it directly in a `let`, an assignment, a `return` or as a statement; inside expressions use `or`"));
+                            .help("use it directly in a `var`, an assignment, a `return` or as a statement; inside expressions use `or`"));
                         false
                     }
                 };

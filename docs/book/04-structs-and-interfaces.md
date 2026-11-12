@@ -20,7 +20,7 @@ struct Player {
 }
 
 fn main() {
-    let p = Player{name: "Kai", health: 20}    // every field must be given
+    var p = Player{name: "Kai", health: 20}    // every field must be given
     p.hit(15)
     print(p.name, p.health, p.is_alive())
     print(p)                                   // Player{name: "Kai", health: 5}
@@ -77,7 +77,7 @@ fn describe(a: Animal) -> string {
 }
 
 fn main() {
-    let zoo: [Animal] = [Dog{}, Robot{model: "R2"}]
+    var zoo: [Animal] = [Dog{}, Robot{model: "R2"}]
     for a in zoo {
         print(describe(a))
     }

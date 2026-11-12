@@ -12,7 +12,7 @@ pub enum Item {
     Fn(FnDecl),
     Struct(StructDecl),
     Interface(InterfaceDecl),
-    /// A top-level `let` / `const`.
+    /// A top-level `var` / `const`.
     Global(Stmt),
     /// A `check "name" { ... }` test block.
     Check { name: String, body: Block },

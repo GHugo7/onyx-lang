@@ -26,7 +26,7 @@ struct Bank {
         if self.accounts.has(owner) {
             fail "{owner} already has an account"
         }
-        let account = Account{owner: owner, balance: 0}
+        var account = Account{owner: owner, balance: 0}
         self.accounts[owner] = account
         return account
     }
@@ -39,8 +39,8 @@ struct Bank {
 
     // `?` passes any failure straight to the caller.
     fn transfer(self, from: string, to: string, amount: int) -> void! {
-        let source = self.find(from)?
-        let target = self.find(to)?
+        var source = self.find(from)?
+        var target = self.find(to)?
         source.withdraw(amount)?
         target.deposit(amount)?
     }
@@ -51,8 +51,8 @@ fn new_bank() -> Bank {
 }
 
 fn main() -> void! {
-    let bank = new_bank()
-    let alice = bank.open("alice")?
+    var bank = new_bank()
+    var alice = bank.open("alice")?
     bank.open("bob")?
     alice.deposit(100)?
 
@@ -73,9 +73,9 @@ fn main() -> void! {
 }
 
 check "transfer moves money" {
-    let bank = new_bank()
-    let a = bank.open("a") catch e { return }
-    let b = bank.open("b") catch e { return }
+    var bank = new_bank()
+    var a = bank.open("a") catch e { return }
+    var b = bank.open("b") catch e { return }
     a.deposit(50) catch e { expect(false) }
     bank.transfer("a", "b", 20) catch e { expect(false) }
     expect(a.balance == 30)
@@ -83,9 +83,9 @@ check "transfer moves money" {
 }
 
 check "cannot overdraw" {
-    let bank = new_bank()
-    let a = bank.open("a") catch e { return }
-    let failed = false
+    var bank = new_bank()
+    var a = bank.open("a") catch e { return }
+    var failed = false
     a.withdraw(1) catch e { failed = true }
     expect(failed)
     expect(a.balance == 0)

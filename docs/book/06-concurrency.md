@@ -27,8 +27,8 @@ fn download(name: string, done: chan<string>) {
 }
 
 fn main() {
-    let done = chan<string>()
-    let files = ["a.zip", "b.zip", "c.zip"]
+    var done = chan<string>()
+    var files = ["a.zip", "b.zip", "c.zip"]
     for f in files {
         fork { download(f, done) }      // all three run at once
     }
@@ -55,9 +55,9 @@ fn count_to(n: int, out: chan<int>) {
 }
 
 fn main() {
-    let numbers = chan<int>()
+    var numbers = chan<int>()
     fork { count_to(5, numbers) }
-    let sum = 0
+    var sum = 0
     for n in numbers {
         sum += n
     }

@@ -8,6 +8,6 @@ struct Square {
 }
 
 fn main() {
-    let s: Shape = Square{side: 1.0}
+    var s: Shape = Square{side: 1.0}
     print(s.area())
 }

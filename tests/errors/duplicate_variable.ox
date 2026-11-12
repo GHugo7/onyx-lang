@@ -1,6 +1,6 @@
 // error: E0103
 fn main() {
-    let a = 1
-    let a = 2
+    var a = 1
+    var a = 2
     print(a)
 }

@@ -34,7 +34,7 @@ struct Node {
     children: [Node]
 
     fn count(self) -> int {
-        let n = 1
+        var n = 1
         for c in self.children {
             n += c.count()
         }
@@ -47,7 +47,7 @@ fn intro(a: Animal) -> string {
 }
 
 fn apply(f: fn(int) -> int, times: int, start: int) -> int {
-    let v = start
+    var v = start
     for i in 0..times {
         v = f(v)
     }
@@ -63,27 +63,27 @@ fn double(x: int) -> int {
 }
 
 fn main() {
-    let cat = Cat{lives: 9}
-    let pets: [Animal] = [Dog{}, cat]
+    var cat = Cat{lives: 9}
+    var pets: [Animal] = [Dog{}, cat]
     for p in pets {
         print(intro(p))
     }
     print(cat.lives)
 
-    let log: [int] = []
-    let c = Counter{value: 0, step: 5, on_change: fn(v: int) { log.push(v) }}
+    var log: [int] = []
+    var c = Counter{value: 0, step: 5, on_change: fn(v: int) { log.push(v) }}
     c.tick().tick().tick()
     print(c.value, log)
 
-    let tree = Node{label: "root", children: [
+    var tree = Node{label: "root", children: [
         Node{label: "a", children: []},
         Node{label: "b", children: [Node{label: "c", children: []}]},
     ]}
     print(tree.count(), tree.children[1].children[0].label)
 
     print(apply(double, 3, 1), apply(make_adder(10), 2, 0))
-    let fs = [double, make_adder(1)]
+    var fs = [double, make_adder(1)]
     print(fs[0](21), fs[1](41))
-    let half: float = 1
+    var half: float = 1
     print(half / 2)
 }

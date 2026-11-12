@@ -4,6 +4,6 @@ struct P {
 }
 
 fn main() {
-    let p = P{x: 1}
+    var p = P{x: 1}
     print(p.y)
 }

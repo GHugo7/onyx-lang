@@ -47,7 +47,7 @@ variables around it.
 
 ```onyx
 fn make_counter() -> fn() -> int {
-    let count = 0
+    var count = 0
     return fn() -> int {
         count += 1
         return count
@@ -55,12 +55,12 @@ fn make_counter() -> fn() -> int {
 }
 
 fn main() {
-    let next = make_counter()
+    var next = make_counter()
     next()
     next()
     print(next())    // 3
 
-    let words = ["kiwi", "fig", "banana"]
+    var words = ["kiwi", "fig", "banana"]
     print(words.filter(fn(w: string) -> bool { return w.len() > 3 }))
     print(words.map(fn(w: string) -> int { return w.len() }))
     print(words.sort_by(fn(w: string) -> int { return w.len() }))

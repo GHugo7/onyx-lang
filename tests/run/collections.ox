@@ -5,7 +5,7 @@ struct Point {
 
 fn main() {
     // lists
-    let xs = [5, 3, 8, 1]
+    var xs = [5, 3, 8, 1]
     xs.push(4)
     print(xs, xs.len(), xs[0], xs.contains(8), xs.index_of(8), xs.index_of(99))
     print(xs.sort(), xs.reverse(), xs.slice(1, 3))
@@ -17,19 +17,19 @@ fn main() {
     xs.clear()
     print(xs, xs.pop() or -1)
 
-    let words = "the quick brown fox".split(" ")
+    var words = "the quick brown fox".split(" ")
     print(words.map(fn(w: string) -> int { return w.len() }))
     print(words.filter(fn(w: string) -> bool { return w.len() > 3 }))
     print(words.sort_by(fn(w: string) -> int { return w.len() }))
     print(words.join("-"))
-    let mixed = [1, 2.5]
+    var mixed = [1, 2.5]
     print(mixed[0] + mixed[1])
-    let grid = [[1, 2], [3, 4]]
+    var grid = [[1, 2], [3, 4]]
     grid[1][0] = 30
     print(grid, grid[1][0])
 
     // strings
-    let s = "  Hello, World  "
+    var s = "  Hello, World  "
     print(s.trim().upper(), s.trim().lower(), s.trim().len())
     print("hello".contains("ell"), "hello".starts_with("he"), "hello".ends_with("lo"))
     print("a-b-c".replace("-", "+"), "hello".index_of("l"), "hello".slice(1, 3), "ab".repeat(3))
@@ -39,7 +39,7 @@ fn main() {
     }
 
     // maps
-    let ages: map<string, int> = {}
+    var ages: map<string, int> = {}
     ages["a"] = 1
     ages["b"] = 2
     ages["a"] += 10
@@ -47,22 +47,22 @@ fn main() {
     print(ages.get("b") or 0, ages.get("zzz") or -1)
     ages.remove("a")
     print(ages.keys(), ages.values())
-    let squares = {1: 1, 2: 4, 3: 9}
-    let total = 0
+    var squares = {1: 1, 2: 4, 3: 9}
+    var total = 0
     for k in squares {
         total += squares[k]
     }
     print(total)
 
     // structural equality
-    let p = Point{x: 1, y: 2}
-    let q = Point{y: 2, x: 1}
+    var p = Point{x: 1, y: 2}
+    var q = Point{y: 2, x: 1}
     print(p == q, p != q, [1, 2] == [1, 2], [p] == [q], {"k": [1]} == {"k": [1]})
     q.x = 9
     print(p == q, q)
 
     // ranges
-    let r = 2..5
+    var r = 2..5
     for i in r {
         print(i)
     }

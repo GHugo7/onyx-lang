@@ -17,9 +17,9 @@ struct Player {
 }
 
 fn load_scores(path: string) -> [Player]! {
-    let players: [Player] = []
+    var players: [Player] = []
     for line in read_file(path)?.split("\n") {
-        let parts = line.split(",")
+        var parts = line.split(",")
         if parts.len() != 2 {
             fail "bad line: {line}"
         }
@@ -29,7 +29,7 @@ fn load_scores(path: string) -> [Player]! {
 }
 
 fn main() {
-    let players = load_scores("scores.csv") catch err {
+    var players = load_scores("scores.csv") catch err {
         print("could not load scores: {err}")
         return
     }
@@ -69,7 +69,7 @@ onyx explain E0200         # explain an error code
 
 ```onyx
 fn main() {
-    let name = "world"
+    var name = "world"
     print("Hello, {name}!")
 }
 ```
@@ -93,7 +93,7 @@ fn quarter(n: int) -> int! {
 fn main() {
     print(quarter(12) or 0)         // `or` gives a default value
 
-    let q = quarter(6) catch err {  // `catch` handles it here
+    var q = quarter(6) catch err {  // `catch` handles it here
         print("failed: {err}")
         return
     }
@@ -107,7 +107,7 @@ Forgetting to handle a call is a compile-time error:
 error[E0200]: `half()` can fail
  --> main.ox:9:13
   |
-9 |     let h = half(n)
+9 |     var h = half(n)
   |             ^^^^^^^ this call may return an error
   |
   = help: handle it with `?`, `or`, or `catch`
@@ -117,13 +117,13 @@ error[E0200]: `half()` can fail
 
 ```onyx
 fn fetch_length(url: string, out: chan<string>) {
-    let body = fetch(url) or ""
+    var body = fetch(url) or ""
     out <- "{url}: {body.len()} bytes"
 }
 
 fn main() {
-    let urls = ["https://example.com", "https://example.org"]
-    let results = chan<string>()
+    var urls = ["https://example.com", "https://example.org"]
+    var results = chan<string>()
     for url in urls {
         fork { fetch_length(url, results) }   // both downloads run at once
     }
@@ -158,7 +158,7 @@ struct Square {
 
 fn main() {
     // A struct implements an interface simply by having its methods.
-    let shapes: [Shape] = [Circle{radius: 1.0}, Square{side: 2.0}]
+    var shapes: [Shape] = [Circle{radius: 1.0}, Square{side: 2.0}]
     for s in shapes {
         print(s.area())
     }

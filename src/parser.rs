@@ -103,7 +103,7 @@ impl<'a> Parser<'a> {
             Tok::Fn => Ok(Item::Fn(self.fn_decl(false)?)),
             Tok::Struct => self.struct_decl(),
             Tok::Interface => self.interface_decl(),
-            Tok::Let | Tok::Const => Ok(Item::Global(self.let_stmt()?)),
+            Tok::Var | Tok::Const => Ok(Item::Global(self.let_stmt()?)),
             Tok::Check => {
                 self.advance();
                 let name = match self.peek().clone() {
@@ -125,13 +125,17 @@ impl<'a> Parser<'a> {
                 let body = self.block()?;
                 Ok(Item::Check { name, body })
             }
+            Tok::Ident(word) if word == "let" => {
+                Err(Diagnostic::new("E0003", "Onyx declares variables with `var`, not `let`", self.span())
+                    .label("replace with `var`"))
+            }
             _ => Err(Diagnostic::new(
                 "E0003",
                 format!("expected a declaration, found {}", self.peek().describe()),
                 self.span(),
             )
             .label("not allowed at the top level")
-            .help("only `fn`, `struct`, `interface`, `let`, `const` and `check` can appear at the top level; put statements inside `fn main() { ... }`")),
+            .help("only `fn`, `struct`, `interface`, `var`, `const` and `check` can appear at the top level; put statements inside `fn main() { ... }`")),
         }
     }
 
@@ -314,7 +318,7 @@ impl<'a> Parser<'a> {
 
     fn let_stmt(&mut self) -> PResult<Stmt> {
         let start = self.span();
-        let mutable = self.advance().tok == Tok::Let;
+        let mutable = self.advance().tok == Tok::Var;
         let (name, name_span) = self.ident("a variable name")?;
         let ty = if self.eat(&Tok::Colon) { Some(self.type_expr()?) } else { None };
         if self.peek() == &Tok::Bang {
@@ -327,7 +331,7 @@ impl<'a> Parser<'a> {
                 format!("variable `{name}` must be given a value"),
                 name_span,
             )
-            .help(format!("write `let {name} = ...`")));
+            .help(format!("write `var {name} = ...`")));
         }
         self.advance();
         let init = self.with_no_struct(false, |p| p.expr())?;
@@ -337,7 +341,7 @@ impl<'a> Parser<'a> {
     fn stmt(&mut self) -> PResult<Stmt> {
         let start = self.span();
         match self.peek() {
-            Tok::Let | Tok::Const => self.let_stmt(),
+            Tok::Var | Tok::Const => self.let_stmt(),
             Tok::If => self.if_stmt(),
             Tok::While => {
                 self.advance();
@@ -387,7 +391,11 @@ impl<'a> Parser<'a> {
                 "functions must be declared at the top level",
                 self.span(),
             )
-            .help("to create a function inside another one, use a lambda: `let f = fn(x: int) -> int { ... }`")),
+            .help("to create a function inside another one, use a lambda: `var f = fn(x: int) -> int { ... }`")),
+            Tok::Ident(word) if word == "let" && matches!(self.peek_at(1), Tok::Ident(_)) => {
+                Err(Diagnostic::new("E0003", "Onyx declares variables with `var`, not `let`", self.span())
+                    .label("replace with `var`"))
+            }
             _ => {
                 let target = self.expr()?;
                 let op = match self.peek() {
