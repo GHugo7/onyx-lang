@@ -62,6 +62,7 @@ const __S_LIVE = 16        // number of live objects
 const __S_OUT = 24         // address of the output buffer
 const __S_OUT_USED = 32    // bytes waiting in it
 const __S_TERMINAL = 40    // 1 when standard output is a terminal, 2 when it is not
+const __S_CHARS = 48       // address of the 128 one-character ASCII strings, once made
 const __S_FREE = 56        // free blocks of n bytes are chained from __S_FREE + n
 
 const __SMALL = 1024       // blocks up to this size come from chunks
@@ -326,26 +327,561 @@ fn __rt_append(a: int, b: int) -> int {
     return p
 }
 
-// Number of characters (not bytes): UTF-8 continuation bytes look like 10xxxxxx.
-fn __rt_str_len(s: string) -> int {
-    var p = __str_ptr(s)
-    var n = __load32(p + 8)
-    var count = 0
+// ---- characters ----
+//
+// Positions and lengths are counted in characters, not bytes. In UTF-8 a
+// character takes one to four bytes: the first one tells how many, and the
+// following ones all look like 10xxxxxx.
+
+// Number of characters in the `n` bytes at `at`.
+fn __rt_chars_in(at: int, n: int) -> int {
     var i = 0
     // Eight bytes at a time while they are all plain ASCII (high bit clear):
     // -9187201950435737472 is 0x8080808080808080.
-    while i + 8 <= n && __and(__load64(p + 16 + i), -9187201950435737472) == 0 {
-        count += 8
+    while i + 8 <= n && __and(__load64(at + i), -9187201950435737472) == 0 {
         i += 8
     }
+    var count = i
     while i < n {
-        var byte = __load8(p + 16 + i)
+        var byte = __load8(at + i)
         if byte < 128 || byte >= 192 {
             count += 1
         }
         i += 1
     }
     return count
+}
+
+fn __rt_str_len(s: string) -> int {
+    var p = __str_ptr(s)
+    return __rt_chars_in(p + 16, __load32(p + 8))
+}
+
+// Bytes taken by the character whose first byte is `lead`.
+fn __rt_char_size(lead: int) -> int {
+    if lead < 192 {
+        return 1
+    }
+    if lead < 224 {
+        return 2
+    }
+    if lead < 240 {
+        return 3
+    }
+    return 4
+}
+
+// Bytes taken by the first `count` characters of the `n` bytes at `at`;
+// -1 when there are fewer characters than that.
+fn __rt_skip(at: int, n: int, count: int) -> int {
+    var i = 0
+    var left = count
+    while left >= 8 && i + 8 <= n && __and(__load64(at + i), -9187201950435737472) == 0 {
+        i += 8
+        left -= 8
+    }
+    while left > 0 {
+        if i >= n {
+            return -1
+        }
+        i += __rt_char_size(__load8(at + i))
+        left -= 1
+    }
+    if i > n {
+        return n
+    }
+    return i
+}
+
+// A new string made of the bytes `from` to `to` of the string at `p`.
+fn __rt_str_part(p: int, from: int, to: int) -> int {
+    var out = __rt_new_str(to - from)
+    __copy(out + 16, p + 16 + from, to - from)
+    return out
+}
+
+// The character that starts at byte `at` of the string at `p`, as a string.
+// The 128 ASCII characters are constants made once, on first use, so walking
+// through ordinary text allocates nothing.
+fn __rt_char_at(p: int, at: int) -> int {
+    var byte = __load8(p + 16 + at)
+    if byte >= 128 {
+        var to = at + __rt_char_size(byte)
+        if to > __load32(p + 8) {
+            to = __load32(p + 8)
+        }
+        return __rt_str_part(p, at, to)
+    }
+    var state = __state()
+    var table = __load64(state + __S_CHARS)
+    if table == 0 {
+        table = __rt_alloc(3072)
+        var c = 0
+        while c < 128 {
+            var entry = table + c * 24
+            __store32(entry, -1)
+            __store32(entry + 4, __td_string())
+            __store32(entry + 8, 1)
+            __store32(entry + 12, 8)
+            __store64(entry + 16, c)
+            c += 1
+        }
+        __store64(state + __S_CHARS, table)
+    }
+    return table + byte * 24
+}
+
+// `s[i]`
+fn __rt_str_index(s: string, i: int) -> string {
+    var p = __str_ptr(s)
+    var n = __load32(p + 8)
+    var at = -1
+    if i >= 0 {
+        at = __rt_skip(p + 16, n, i)
+    }
+    if at < 0 || at >= n {
+        __rt_panic("index out of bounds: index " + __rt_int_str(i) + ", length " + __rt_int_str(__rt_str_len(s)))
+    }
+    return __ptr_str(__rt_char_at(p, at))
+}
+
+// ---- string methods ----
+
+fn __rt_str_slice(s: string, from: int, to: int) -> string {
+    var p = __str_ptr(s)
+    var n = __load32(p + 8)
+    var count = __rt_chars_in(p + 16, n)
+    var start = __rt_clamp_index(from, count)
+    var end = __rt_clamp_index(to, count)
+    if end <= start {
+        return ""
+    }
+    if start == 0 && end == count {
+        return s
+    }
+    if count != n {
+        // Some characters take several bytes: find where these two start.
+        var first = __rt_skip(p + 16, n, start)
+        end = first + __rt_skip(p + 16 + first, n - first, end - start)
+        start = first
+    }
+    return __ptr_str(__rt_str_part(p, start, end))
+}
+
+// Whether the `n` bytes at `a` and at `b` are the same.
+fn __rt_same(a: int, b: int, n: int) -> bool {
+    var i = 0
+    while i + 8 <= n && __load64(a + i) == __load64(b + i) {
+        i += 8
+    }
+    while i < n {
+        if __load8(a + i) != __load8(b + i) {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// Where the `m` bytes at `q` first appear in the `n` bytes at `at`, looking
+// from byte `start` on; -1 when they do not.
+fn __rt_find(at: int, n: int, q: int, m: int, start: int) -> int {
+    if m == 0 {
+        return start
+    }
+    var first = __load8(q)
+    var last = n - m
+    var i = start
+    while i <= last {
+        if __load8(at + i) == first && __rt_same(at + i, q, m) {
+            return i
+        }
+        i += 1
+    }
+    return -1
+}
+
+fn __rt_str_index_of(s: string, needle: string) -> int {
+    var p = __str_ptr(s)
+    var q = __str_ptr(needle)
+    var at = __rt_find(p + 16, __load32(p + 8), q + 16, __load32(q + 8), 0)
+    if at <= 0 {
+        return at
+    }
+    return __rt_chars_in(p + 16, at)
+}
+
+fn __rt_str_contains(s: string, needle: string) -> bool {
+    var p = __str_ptr(s)
+    var q = __str_ptr(needle)
+    return __rt_find(p + 16, __load32(p + 8), q + 16, __load32(q + 8), 0) >= 0
+}
+
+fn __rt_str_starts(s: string, prefix: string) -> bool {
+    var p = __str_ptr(s)
+    var q = __str_ptr(prefix)
+    var m = __load32(q + 8)
+    return m <= __load32(p + 8) && __rt_same(p + 16, q + 16, m)
+}
+
+fn __rt_str_ends(s: string, suffix: string) -> bool {
+    var p = __str_ptr(s)
+    var q = __str_ptr(suffix)
+    var n = __load32(p + 8)
+    var m = __load32(q + 8)
+    return m <= n && __rt_same(p + 16 + n - m, q + 16, m)
+}
+
+// Every occurrence of `old` becomes `with`. An empty `old` matches between
+// all characters and at both ends.
+fn __rt_str_replace(s: string, old: string, with: string) -> string {
+    var p = __str_ptr(s)
+    var q = __str_ptr(old)
+    var r = __str_ptr(with)
+    var n = __load32(p + 8)
+    var m = __load32(q + 8)
+    var k = __load32(r + 8)
+    if m == 0 {
+        var out = __rt_new_str(n + (__rt_chars_in(p + 16, n) + 1) * k)
+        var to = out + 16
+        __copy(to, r + 16, k)
+        to += k
+        var i = 0
+        while i < n {
+            var size = __rt_char_size(__load8(p + 16 + i))
+            if i + size > n {
+                size = n - i
+            }
+            __copy(to, p + 16 + i, size)
+            to += size
+            i += size
+            __copy(to, r + 16, k)
+            to += k
+        }
+        return __ptr_str(out)
+    }
+    // Count first, so that the result is allocated once at its exact size.
+    var count = 0
+    var at = __rt_find(p + 16, n, q + 16, m, 0)
+    while at >= 0 {
+        count += 1
+        at = __rt_find(p + 16, n, q + 16, m, at + m)
+    }
+    if count == 0 {
+        return s
+    }
+    var out = __rt_new_str(n + count * (k - m))
+    var to = out + 16
+    var from = 0
+    at = __rt_find(p + 16, n, q + 16, m, 0)
+    while at >= 0 {
+        __copy(to, p + 16 + from, at - from)
+        to += at - from
+        __copy(to, r + 16, k)
+        to += k
+        from = at + m
+        at = __rt_find(p + 16, n, q + 16, m, from)
+    }
+    __copy(to, p + 16 + from, n - from)
+    return __ptr_str(out)
+}
+
+// The pieces of `s` between the occurrences of `separator`, as a list whose
+// descriptor is `td`. An empty separator gives the characters.
+fn __rt_str_split(s: string, separator: string, td: int) -> int {
+    var p = __str_ptr(s)
+    var q = __str_ptr(separator)
+    var n = __load32(p + 8)
+    var m = __load32(q + 8)
+    var out = __rt_list_new(td, 0)
+    if m == 0 {
+        var i = 0
+        while i < n {
+            var piece = __rt_char_at(p, i)
+            __rt_list_push(out, piece)
+            i += __load32(piece + 8)
+        }
+        return out
+    }
+    var from = 0
+    var at = __rt_find(p + 16, n, q + 16, m, 0)
+    while at >= 0 {
+        __rt_list_push(out, __rt_str_part(p, from, at))
+        from = at + m
+        at = __rt_find(p + 16, n, q + 16, m, from)
+    }
+    __rt_list_push(out, __rt_str_part(p, from, n))
+    return out
+}
+
+fn __rt_str_chars(s: string, td: int) -> int {
+    return __rt_str_split(s, "", td)
+}
+
+fn __rt_str_repeat(s: string, times: int) -> string {
+    if times < 0 {
+        __rt_panic("repeat count cannot be negative")
+    }
+    var p = __str_ptr(s)
+    var n = __load32(p + 8)
+    if times == 0 || n == 0 {
+        return ""
+    }
+    if times == 1 {
+        return s
+    }
+    if times > 2000000000 / n {
+        __rt_fatal("string too long")
+    }
+    var out = __rt_new_str(n * times)
+    var i = 0
+    while i < times {
+        __copy(out + 16 + i * n, p + 16, n)
+        i += 1
+    }
+    return __ptr_str(out)
+}
+
+// Bytes taken by the white-space character at `at`, where `n` bytes are
+// left; 0 when it is something else. Besides the ASCII ones, Unicode has a
+// few spaces of two and three bytes.
+fn __rt_space_size(at: int, n: int) -> int {
+    var c = __load8(at)
+    if c == 32 || (c >= 9 && c <= 13) {
+        return 1
+    }
+    if c < 194 || n < 2 {
+        return 0
+    }
+    var d = __load8(at + 1)
+    if c == 194 && d == 160 {
+        return 2    // U+00A0, the no-break space
+    }
+    if n < 3 {
+        return 0
+    }
+    var e = __load8(at + 2)
+    if c == 226 && d == 128 && ((e >= 128 && e <= 138) || e == 168 || e == 169 || e == 175) {
+        return 3    // U+2000 to U+200A, U+2028, U+2029, U+202F
+    }
+    if (c == 225 && d == 154 && e == 128) || (c == 226 && d == 129 && e == 159) {
+        return 3    // U+1680, U+205F
+    }
+    if (c == 227 && d == 128 && e == 128) || (c == 239 && d == 187 && e == 191) {
+        return 3    // U+3000, U+FEFF
+    }
+    return 0
+}
+
+fn __rt_str_trim(s: string) -> string {
+    var p = __str_ptr(s)
+    var n = __load32(p + 8)
+    var from = 0
+    while from < n {
+        var size = __rt_space_size(p + 16 + from, n - from)
+        if size == 0 {
+            break
+        }
+        from += size
+    }
+    var to = n
+    while to > from {
+        // Step back to the first byte of the last character.
+        var at = to - 1
+        while at > from && __and(__load8(p + 16 + at), 192) == 128 {
+            at -= 1
+        }
+        if __rt_space_size(p + 16 + at, to - at) != to - at {
+            break
+        }
+        to = at
+    }
+    if from == 0 && to == n {
+        return s
+    }
+    return __ptr_str(__rt_str_part(p, from, to))
+}
+
+// Upper- and lower-case forms are known for the letters that take one or two
+// bytes: the Latin alphabet with its accents, Greek and Cyrillic. They are
+// given as character numbers (code points); other characters stay as they are.
+
+fn __rt_upper_code(c: int) -> int {
+    if c < 256 {
+        if c == 181 {
+            return 924          // the micro sign becomes a Greek capital mu
+        }
+        if c == 255 {
+            return 376          // y with diaeresis
+        }
+        if c >= 224 && c != 247 {
+            return c - 32       // a-grave to thorn, except the division sign
+        }
+        return c
+    }
+    if c < 384 {
+        // Latin Extended-A: capital and small letters alternate.
+        if c == 305 {
+            return 73           // dotless i
+        }
+        if c == 383 {
+            return 83           // long s
+        }
+        if c == 312 || c == 329 {
+            return c
+        }
+        if c < 312 || (c >= 330 && c < 376) {
+            return c - c % 2    // the small letter is the odd one
+        }
+        if c % 2 == 0 && c != 376 {
+            return c - 1        // the small letter is the even one
+        }
+        return c
+    }
+    if c >= 940 && c <= 974 {
+        // Greek
+        if c == 940 {
+            return 902
+        }
+        if c <= 943 {
+            return c - 37
+        }
+        if c == 944 {
+            return c
+        }
+        if c == 962 {
+            return 931          // final sigma
+        }
+        if c <= 971 {
+            return c - 32
+        }
+        if c == 972 {
+            return 908
+        }
+        return c - 63
+    }
+    if c >= 1072 && c <= 1103 {
+        return c - 32           // Cyrillic
+    }
+    if c >= 1104 && c <= 1119 {
+        return c - 80
+    }
+    return c
+}
+
+fn __rt_lower_code(c: int) -> int {
+    if c < 256 {
+        if c >= 192 && c <= 222 && c != 215 {
+            return c + 32       // A-grave to Thorn, except the multiplication sign
+        }
+        return c
+    }
+    if c < 384 {
+        if c == 304 || c == 329 || c == 383 {
+            return c
+        }
+        if c == 376 {
+            return 255
+        }
+        if c < 312 || (c >= 330 && c < 376) {
+            return c + 1 - c % 2
+        }
+        if c % 2 == 1 {
+            return c + 1
+        }
+        return c
+    }
+    if c >= 902 && c <= 939 {
+        // Greek
+        if c == 902 {
+            return 940
+        }
+        if c >= 904 && c <= 906 {
+            return c + 37
+        }
+        if c == 908 {
+            return 972
+        }
+        if c == 910 || c == 911 {
+            return c + 63
+        }
+        if c >= 913 && c != 930 {
+            return c + 32
+        }
+        return c
+    }
+    if c >= 1024 && c <= 1039 {
+        return c + 80           // Cyrillic
+    }
+    if c >= 1040 && c <= 1071 {
+        return c + 32
+    }
+    return c
+}
+
+fn __rt_str_case(s: string, upper: bool) -> string {
+    var p = __str_ptr(s)
+    var n = __load32(p + 8)
+    // No supported letter grows when its case changes; a few shrink.
+    var out = __rt_new_str(n)
+    var to = out + 16
+    var i = 0
+    while i < n {
+        var c = __load8(p + 16 + i)
+        if c < 128 {
+            if upper {
+                if c >= 97 && c <= 122 {
+                    c -= 32
+                }
+            } else if c >= 65 && c <= 90 {
+                c += 32
+            }
+            __store8(to, c)
+            to += 1
+            i += 1
+        } else if c >= 194 && c < 224 && i + 1 < n {
+            var code = (c - 192) * 64 + __load8(p + 16 + i + 1) - 128
+            i += 2
+            if upper && code == 223 {
+                // The German sharp s becomes two letters.
+                __store8(to, 83)
+                __store8(to + 1, 83)
+                to += 2
+            } else {
+                if upper {
+                    code = __rt_upper_code(code)
+                } else {
+                    code = __rt_lower_code(code)
+                }
+                if code < 128 {
+                    __store8(to, code)
+                    to += 1
+                } else {
+                    __store8(to, 192 + code / 64)
+                    __store8(to + 1, 128 + code % 64)
+                    to += 2
+                }
+            }
+        } else {
+            var size = __rt_char_size(c)
+            if i + size > n {
+                size = n - i
+            }
+            __copy(to, p + 16 + i, size)
+            to += size
+            i += size
+        }
+    }
+    __store32(out + 8, to - out - 16)
+    return __ptr_str(out)
+}
+
+fn __rt_str_upper(s: string) -> string {
+    return __rt_str_case(s, true)
+}
+
+fn __rt_str_lower(s: string) -> string {
+    return __rt_str_case(s, false)
 }
 
 // Compares two strings byte by byte: negative, zero or positive, like a - b.
@@ -448,17 +984,17 @@ fn __rt_int_into(buffer: int, n: int) -> int {
     return s
 }
 
-fn __rt_is_space(c: int) -> bool {
-    return c == 32 || (c >= 9 && c <= 13)
-}
-
 // Reads a whole number, with an optional sign and spaces around it.
 fn __rt_parse_int(s: string) -> int! {
     var p = __str_ptr(s)
     var n = __load32(p + 8)
     var i = 0
-    while i < n && __rt_is_space(__load8(p + 16 + i)) {
-        i += 1
+    while i < n {
+        var size = __rt_space_size(p + 16 + i, n - i)
+        if size == 0 {
+            break
+        }
+        i += size
     }
     var negative = false
     if i < n {
@@ -486,8 +1022,12 @@ fn __rt_parse_int(s: string) -> int! {
         digits += 1
         i += 1
     }
-    while i < n && __rt_is_space(__load8(p + 16 + i)) {
-        i += 1
+    while i < n {
+        var size = __rt_space_size(p + 16 + i, n - i)
+        if size == 0 {
+            break
+        }
+        i += size
     }
     if !negative && value == -9223372036854775807 - 1 {
         fits = false

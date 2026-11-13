@@ -71,6 +71,9 @@ means the call can fail and must be handled with `?`, `or` or `catch`.
 | `chars() -> [string]` | |
 | `repeat(n: int) -> string` | |
 | `s[i]` | The character at position `i` |
+| `for c in s { }` | Goes through the characters |
+
+Positions and lengths count characters, not bytes: `"été".len()` is 3.
 
 ## [T] (list)
 

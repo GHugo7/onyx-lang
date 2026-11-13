@@ -437,7 +437,12 @@ impl Gen {
             }
             16 => {
                 let (s, _) = self.string(depth - 1);
-                (format!("{s}.len()"), 1 << 24)
+                if self.rng.chance(60) {
+                    (format!("{s}.len()"), 1 << 24)
+                } else {
+                    let needle = self.rng.pick(&["\"a\"", "\"l\"", "\"\"", "\"é\"", "\"lo\"", "\"true\"", "\"1\"", "\" \""]);
+                    (format!("{s}.index_of({needle})"), 1 << 24)
+                }
             }
             17 => match self.rng.below(4) {
                 0 => {
@@ -513,7 +518,7 @@ impl Gen {
     // ---- booleans ----
 
     fn boolean(&mut self, depth: u32) -> String {
-        let choice = if depth == 0 { self.rng.below(3) } else { self.rng.below(15) };
+        let choice = if depth == 0 { self.rng.below(3) } else { self.rng.below(17) };
         match choice {
             0 => self.rng.pick(&["true", "false"]).to_string(),
             1 | 2 => match self.some_var(Ty::Bool) {
@@ -545,6 +550,12 @@ impl Gen {
                     let (s, _) = self.short_string();
                     format!("{ss}.contains({s})")
                 }
+            }
+            15 => {
+                let (s, _) = self.string(depth - 1);
+                let method = self.rng.pick(&["contains", "starts_with", "ends_with"]);
+                let (part, _) = self.short_string();
+                format!("{s}.{method}({part})")
             }
             13 => match self.rng.below(3) {
                 0 => format!("g_ages.has({})", self.short_string().0),
@@ -636,8 +647,36 @@ impl Gen {
     }
 
     fn string(&mut self, depth: u32) -> (String, u64) {
-        let choice = if depth == 0 { self.rng.below(4) } else { self.rng.below(16) };
+        let choice = if depth == 0 { self.rng.below(4) } else { self.rng.below(21) };
         match choice {
+            16 => {
+                let (s, size) = self.string(depth - 1);
+                (format!("{s}.{}()", self.rng.pick(&["upper", "lower", "trim"])), size)
+            }
+            17 => {
+                let (s, size) = self.string(depth - 1);
+                let from = self.rng.between(-3, 4);
+                let to = from + self.rng.between(-1, 6);
+                (format!("{s}.slice({from}, {to})"), size)
+            }
+            18 => {
+                let (s, size) = self.short_string();
+                let old = self.rng.pick(&["\"a\"", "\"l\"", "\"\"", "\" \"", "\"é\"", "\"ab\"", "\"true\"", "\"1\"", "\"-\""]);
+                let new = self.rng.pick(&["\"\"", "\"_\"", "\"éé\"", "\"$&\"", "\"ab\""]);
+                (format!("{s}.replace({old}, {new})"), size * 3 + 2)
+            }
+            19 => {
+                if self.rng.chance(50) {
+                    let (s, size) = self.short_string();
+                    let times = self.rng.between(0, 3);
+                    (format!("{s}.repeat({times})"), size * 3)
+                } else {
+                    // One character of a constant, at a position that exists.
+                    let text = self.rng.pick(&["\"a\"", "\"onyx\"", "\"héllo\"", "\"x y z\"", "\"UPPER\"", "\"日本語\""]);
+                    let at = self.bounded_int(depth - 1);
+                    (format!("{text}[abs({at}) % {}]", text_len(text) - 2), 1)
+                }
+            }
             0 | 1 => {
                 let text = self.rng.pick(TEXTS);
                 (text.to_string(), text_len(text))
@@ -736,8 +775,17 @@ impl Gen {
     }
 
     fn strs(&mut self, depth: u32) -> (String, u64) {
-        let choice = if depth == 0 { self.rng.below(4) } else { self.rng.below(8) };
+        let choice = if depth == 0 { self.rng.below(4) } else { self.rng.below(10) };
         match choice {
+            8 => {
+                let (s, _) = self.short_string();
+                let sep = self.rng.pick(&["\"\"", "\" \"", "\"l\"", "\"-\"", "\"é\"", "\":\"", "\"ab\""]);
+                (format!("{s}.split({sep})"), 61)
+            }
+            9 => {
+                let (s, _) = self.short_string();
+                (format!("{s}.chars()"), 60)
+            }
             0 | 1 => {
                 let n = 1 + self.rng.below(3);
                 let items: Vec<String> = (0..n).map(|_| self.short_string().0).collect();
@@ -1170,7 +1218,9 @@ impl Gen {
         if self.loops >= self.max_loops {
             return self.list_op();
         }
-        let (list, item_ty, item_size) = match self.rng.below(5) {
+        let (list, item_ty, item_size) = match self.rng.below(6) {
+            // The characters of a string.
+            5 => (self.string(2).0, Ty::Str, 4),
             0 | 1 => (self.ints(2).0, Ty::Int, 1 << 40),
             2 => (self.strs(2).0, Ty::Str, GROWING),
             3 => (self.points(2).0, Ty::Point, GROWING),

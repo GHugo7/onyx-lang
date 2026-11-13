@@ -989,7 +989,8 @@ impl<'a> Gen<'a> {
                 Type::Range => self.for_range(var, *var_span, iter, body),
                 Type::List(elem) => self.for_list(var, *var_span, iter, body, &elem),
                 Type::Map(key, _) => self.for_map(var, *var_span, iter, body, &key),
-                _ => self.unsupported(iter.span, "loops over strings and channels"),
+                Type::Str => self.for_str(var, *var_span, iter, body),
+                _ => self.unsupported(iter.span, "loops over channels"),
             },
             StmtKind::Return(Some(v)) if matches!(v.kind, ExprKind::Catch { .. }) => self.catch(v, Sink::Return),
             StmtKind::Return(value) => {
@@ -1795,11 +1796,10 @@ impl<'a> Gen<'a> {
                 let key = self.key_arg(index);
                 self.call_rt("__rt_map_at", &[Arg::Borrow(obj), key], true);
             }
+            ExprKind::Index { obj, index } if self.ty(obj) == Type::Str => {
+                self.call_rt("__rt_str_index", &[Arg::Borrow(obj), Arg::Value(index)], true);
+            }
             ExprKind::Index { obj, index } => {
-                if !matches!(self.ty(obj), Type::List(_)) {
-                    self.unsupported(e.span, "indexing into strings");
-                    return;
-                }
                 if self.is_place(e) {
                     self.place(e);
                     if is_ref(&ty) {
@@ -1966,7 +1966,7 @@ impl<'a> Gen<'a> {
             ExprKind::Binary { lhs, rhs, .. } => self.is_pure(lhs) && self.is_pure(rhs),
             ExprKind::Field { obj, .. } => matches!(self.ty(obj), Type::Struct(_)) && self.is_pure(obj),
             ExprKind::Index { obj, index } => {
-                matches!(self.ty(obj), Type::List(_)) && self.is_pure(obj) && self.is_pure(index)
+                matches!(self.ty(obj), Type::List(_) | Type::Str) && self.is_pure(obj) && self.is_pure(index)
             }
             ExprKind::Call { callee, args } => {
                 let receiver_pure = match &callee.kind {
@@ -1975,6 +1975,8 @@ impl<'a> Gen<'a> {
                 };
                 let harmless = match self.call_kind(e) {
                     Some(CallKind::Builtin(name)) => matches!(name.as_str(), "str" | "abs" | "min" | "max"),
+                    // Strings never change: all their methods only read them.
+                    Some(CallKind::BuiltinMethod(Recv::Str, _)) => true,
                     Some(CallKind::BuiltinMethod(_, name)) => matches!(name.as_str(), "len" | "contains" | "index_of"),
                     _ => false,
                 };
@@ -2422,9 +2424,9 @@ impl<'a> Gen<'a> {
                 self.drop_args(&owned, has_result);
             }
             Some(CallKind::Builtin(name)) => self.builtin(&name, e, args),
-            Some(CallKind::BuiltinMethod(Recv::Str, name)) if name == "len" => {
+            Some(CallKind::BuiltinMethod(Recv::Str, name)) => {
                 let ExprKind::Field { obj, .. } = &callee.kind else { return };
-                self.call_rt("__rt_str_len", &[Arg::Borrow(obj)], true);
+                self.string_method(e, obj, &name, args);
             }
             Some(CallKind::BuiltinMethod(Recv::List, name)) => {
                 let ExprKind::Field { obj, .. } = &callee.kind else { return };
@@ -2595,6 +2597,80 @@ impl<'a> Gen<'a> {
         self.asm.alu_imm(Alu::Add, RAX, 1);
         self.store_loc(position, RAX);
         self.asm.jmp(top);
+
+        self.asm.bind(end);
+        self.release_scopes(self.scopes.len() - 1);
+        self.scopes.pop();
+    }
+
+    fn string_method(&mut self, e: &Expr, obj: &Expr, name: &str, args: &[Expr]) {
+        let text = Arg::Borrow(obj);
+        let strings = Arg::Descriptor(Type::List(Box::new(Type::Str)));
+        match name {
+            "len" => self.call_rt("__rt_str_len", &[text], true),
+            "upper" => self.call_rt("__rt_str_upper", &[text], true),
+            "lower" => self.call_rt("__rt_str_lower", &[text], true),
+            "trim" => self.call_rt("__rt_str_trim", &[text], true),
+            "contains" => self.call_rt("__rt_str_contains", &[text, Arg::Borrow(&args[0])], true),
+            "starts_with" => self.call_rt("__rt_str_starts", &[text, Arg::Borrow(&args[0])], true),
+            "ends_with" => self.call_rt("__rt_str_ends", &[text, Arg::Borrow(&args[0])], true),
+            "index_of" => self.call_rt("__rt_str_index_of", &[text, Arg::Borrow(&args[0])], true),
+            "slice" => self.call_rt("__rt_str_slice", &[text, Arg::Value(&args[0]), Arg::Value(&args[1])], true),
+            "replace" => {
+                self.call_rt("__rt_str_replace", &[text, Arg::Borrow(&args[0]), Arg::Borrow(&args[1])], true)
+            }
+            "split" => self.call_rt("__rt_str_split", &[text, Arg::Borrow(&args[0]), strings], true),
+            "chars" => self.call_rt("__rt_str_chars", &[text, strings], true),
+            "repeat" => self.call_rt("__rt_str_repeat", &[text, Arg::Value(&args[0])], true),
+            _ => self.unsupported(e.span, &format!("calls to the string method `{name}`")),
+        }
+    }
+
+    /// `for c in text`: one character per turn. The loop keeps a position in
+    /// bytes, so that a text of any length is walked in a single pass.
+    fn for_str(&mut self, var: &str, var_span: Span, iter: &Expr, body: &Block) {
+        let (top, next, check, end) =
+            (self.asm.new_label(), self.asm.new_label(), self.asm.new_label(), self.asm.new_label());
+        // Outer scope: the string (kept alive for the whole loop) and the position in it.
+        self.scopes.push(Vec::new());
+        self.expr(iter);
+        let text = self.declare("<string>", (var_span.start, SUBJECT), &Type::Str);
+        self.store_loc(text, RAX);
+        let position = self.home((var_span.start, COUNTER));
+        self.asm.mov_imm(RAX, 0);
+        self.store_loc(position, RAX);
+        self.asm.jmp(check);
+
+        self.asm.bind(top);
+        self.load_loc(RAX, text);
+        self.asm.push(RAX);
+        self.load_loc(RAX, position);
+        self.asm.push(RAX);
+        self.call_runtime("__rt_char_at", 2);
+        // The next turn starts after this character, however many bytes it takes.
+        self.asm.load32(RCX, RAX, 8);
+        self.load_loc(RDX, position);
+        self.asm.alu(Alu::Add, RDX, RCX);
+        self.store_loc(position, RDX);
+
+        // Inner scope: the loop variable, released after each turn.
+        self.scopes.push(Vec::new());
+        let item = self.declare(var, (var_span.start, NAMED), &Type::Str);
+        self.store_loc(item, RAX);
+        let depth = self.scopes.len();
+        self.loops.push(Loop { next, end, continue_from: depth, break_from: depth - 1 });
+        self.block(body);
+        self.loops.pop();
+
+        self.asm.bind(next);
+        self.release_scopes(depth - 1);
+        self.scopes.pop();
+        self.asm.bind(check);
+        self.load_loc(RCX, text);
+        self.asm.load32(RCX, RCX, 8);
+        self.load_loc(RAX, position);
+        self.asm.alu(Alu::Cmp, RAX, RCX);
+        self.asm.jcc(Cc::L, top);
 
         self.asm.bind(end);
         self.release_scopes(self.scopes.len() - 1);

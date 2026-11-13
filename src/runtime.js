@@ -328,6 +328,9 @@ const $rt = (() => {
     },
   };
   const strIdx = (s, i) => (bounds(s.length, i), s[i]);
+  // A function as replacement: a plain string would have its `$` patterns expanded.
+  const replace = (s, old, by) => s.replaceAll(old, () => by);
+  const split = (s, sep) => (sep === "" ? Array.from(s) : s.split(sep));
   const repeat = (s, n) => (n < 0 ? panic("repeat count cannot be negative") : s.repeat(n));
   const mapTryGet = (m, k) => (m.has(k) ? m.get(k) : fail("key not found: " + repr(k)));
 
@@ -335,7 +338,7 @@ const $rt = (() => {
     OnyxError, Chan, CLOSED, panic, fail, str, fstr, print, idiv, imod, idx, setIdx, mapGet, eq,
     or, orAsync, pass, passAsync, caught, fork, sleep, run, runTests, expect, parseInt_, parseFloat_, readFile,
     writeFile, appendFile, fileExists, args, env, exit, input, fetch_, randomInt, list, strIdx,
-    repeat, mapTryGet,
+    repeat, replace, split, mapTryGet,
     setWriter: (w) => (write = w),
   };
 })();

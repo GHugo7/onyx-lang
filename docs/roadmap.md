@@ -27,9 +27,11 @@ for what works today.
    [benchmark](../benchmarks/README.md), in a fraction of the memory.
 4. **Error handling** (done): `!`, `fail`, `?`, `or` and `catch`, without
    exceptions.
-5. **The rest of the language** on the native target: the remaining string
-   methods, floats, lambdas, files, `fork` and channels.
-6. **Self-hosting**: the compiler rewritten in Onyx.
+5. **Strings** (done): every string method, indexing and loops over
+   characters, counted in characters rather than bytes.
+6. **The rest of the language** on the native target: floats, lambdas,
+   files, `fork` and channels.
+7. **Self-hosting**: the compiler rewritten in Onyx.
 
 ## Later
 
@@ -58,3 +60,5 @@ These concern the JavaScript target; see [native.md](native.md) for the native o
   JavaScript). They run in parallel while waiting on I/O or `sleep`, not while
   computing.
 - Run-time panics do not show the Onyx line number yet.
+- Characters outside the Basic Multilingual Plane (most emoji) count as two
+  in `len`, `s[i]` and `slice`.

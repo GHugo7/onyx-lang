@@ -39,12 +39,14 @@ The native target is being built up step by step. It currently supports:
 - `var`, assignment, `if` / `else`, `while`, `for i in a..b`, `break`,
   `continue`, `return`
 - arithmetic, comparisons, `&&`, `||`, `!`
-- string interpolation, `+`, `+=`, comparisons and `.len()`
+- strings: interpolation, `+`, `+=`, comparisons, `s[i]`, `for c in s`, and
+  the methods `len`, `upper`, `lower`, `trim`, `contains`, `starts_with`,
+  `ends_with`, `index_of`, `slice`, `replace`, `split`, `chars`, `repeat`
 - `print`, `str`, `parse_int`, `abs`, `min`, `max`, `exit`, `panic`
 - modules (`import`)
 
-Anything else (floats, lambdas, `fork`, channels, the other string methods,
-`map` / `filter` / `sort_by`, `onyx test`) is rejected with error
+Anything else (floats, lambdas, `fork`, channels, `map` / `filter` /
+`sort_by`, `onyx test`) is rejected with error
 `E0500` rather than compiled incorrectly. Those programs still run on the
 default JavaScript target. Functions that are never called are not compiled,
 so an unsupported feature in unused code does not get in the way.
@@ -55,6 +57,14 @@ Known gaps in what is supported:
   message. So does dropping a chain of objects nested hundreds of thousands
   deep (a hand-made linked list, say), because they are released recursively.
 - Every list element takes 8 bytes, a `bool` included.
+- `upper` and `lower` know the letters of the Latin alphabet with their
+  accents, Greek and Cyrillic. Letters of other alphabets are left as they
+  are, as are the few whose other case is longer (`İ`, `ŉ`, `ΐ`, `ΰ`), and a
+  capital sigma always becomes `σ`.
+- Positions in a string count characters, and a character takes one to four
+  bytes: `s[i]` and `slice` have to walk from the start of the string when it
+  holds accents or other non-ASCII characters. Use `for c in s` to go through
+  a long text; it is a single pass.
 - Adding or removing keys of a map inside a `for` loop over that same map
   is not specified: the two targets may visit different keys afterwards.
 - Only Linux on x86-64 is supported.
@@ -147,6 +157,10 @@ In the native code generator (`src/native/mod.rs`, `src/native/plan.rs`):
   full, when the program ends, and after every line on a terminal.
 - **Remembered method lookups.** A call through an interface remembers the
   last type it saw and the method it found.
+- **Characters without allocation.** `for c in text`, `s[i]`, `chars` and
+  `split("")` hand out the same 128 constant strings for ASCII characters;
+  only accented and other multi-byte characters are allocated. Searching
+  and counting skip eight ASCII bytes at a time.
 - **Lists.** Reading an element is a bounds check and a load; `push` stores
   in place when the list has room.
 - **Maps.** A hash table with open addressing over a dense array of entries:
@@ -202,10 +216,9 @@ documented at the top of `runtime.ox`.
 
 ## Roadmap for this target
 
-1. The remaining string and list methods, `for` over a string
-2. Floats
-3. Lambdas and closures
-4. Files, arguments, `input`
-5. `fork` and channels
-6. Weak references, to break cycles
-7. Other systems (ARM64, Windows, macOS)
+1. Floats
+2. Lambdas and closures, and with them `map`, `filter` and `sort_by`
+3. Files, arguments, `input`
+4. `fork` and channels
+5. Weak references, to break cycles
+6. Other systems (ARM64, Windows, macOS)
