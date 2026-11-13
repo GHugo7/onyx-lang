@@ -31,9 +31,10 @@ for what works today.
    characters, counted in characters rather than bytes.
 6. **Floats** (done): arithmetic in the SSE registers, exact reading and
    writing of decimal numbers, `pow`, all written without a C library.
-7. **The rest of the language** on the native target: lambdas, files,
-   `fork` and channels.
-8. **Self-hosting**: the compiler rewritten in Onyx.
+7. **Lambdas and closures** (done), with `map`, `filter` and `sort_by`.
+8. **The rest of the language** on the native target: files, `fork` and
+   channels.
+9. **Self-hosting**: the compiler rewritten in Onyx.
 
 ## Later
 

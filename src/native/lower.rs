@@ -18,7 +18,7 @@
 //! The JavaScript target does not need any of this: exceptions unwind for it.
 
 use crate::ast::*;
-use crate::checker::{Analysis, Type};
+use crate::checker::{Analysis, CallKind, Type};
 use crate::diagnostics::Span;
 use std::collections::HashSet;
 
@@ -45,6 +45,8 @@ pub fn lower(program: &mut Program, an: &mut Analysis) {
                     l.block(&mut m.body);
                 }
             }
+            // A top-level variable may hold a lambda.
+            Item::Global(Stmt { kind: StmtKind::Let { init, .. }, .. }) => l.lambdas(init),
             _ => {}
         }
     }
@@ -147,8 +149,34 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Like `operands`, for values that are turned into text (the arguments
+    /// of `print`, the parts of an interpolated string). A list or a struct
+    /// is shown as it is at that moment: what is kept for later is its text,
+    /// not the object, which a later operand could still change.
+    fn shown(&mut self, mut children: Vec<&mut Expr>, out: &mut Vec<Stmt>) {
+        let Some(last) = children.iter().rposition(|c| contains_try(c)) else { return };
+        for child in children.iter_mut().take(last + 1) {
+            self.expr(child, out);
+            self.settle(child, out);
+            if matches!(self.ty(child), Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Interface(_)) {
+                let span = child.span;
+                let value = std::mem::replace(&mut **child, Expr { id: 0, span, kind: ExprKind::Bool(false) });
+                let callee = self.node(ExprKind::Ident("str".to_string()), Type::Unknown, span);
+                let text = self.node(ExprKind::Call { callee: Box::new(callee), args: vec![value] }, Type::Str, span);
+                self.an.calls.insert(text.id, CallKind::Builtin("str".to_string()));
+                **child = self.temp(text, out);
+            }
+        }
+    }
+
     /// The receiver and the arguments of a call.
     fn call_operands(&mut self, call: &mut Expr, out: &mut Vec<Stmt>) {
+        if matches!(self.an.calls.get(&call.id), Some(CallKind::Builtin(name)) if name == "print" || name == "str") {
+            if let ExprKind::Call { args, .. } = &mut call.kind {
+                self.shown(args.iter_mut().collect(), out);
+            }
+            return;
+        }
         if let ExprKind::Call { callee, args } = &mut call.kind {
             let mut children: Vec<&mut Expr> = Vec::new();
             if matches!(callee.kind, ExprKind::Field { .. }) {
@@ -232,7 +260,7 @@ impl<'a> Lower<'a> {
                         StrPart::Lit(_) => None,
                     })
                     .collect();
-                self.operands(children, out);
+                self.shown(children, out);
             }
             ExprKind::List(items) => self.operands(items.iter_mut().collect(), out),
             ExprKind::Map(entries) => {
@@ -270,9 +298,74 @@ impl<'a> Lower<'a> {
         block.stmts = out;
     }
 
+    /// Lambdas are functions of their own: their bodies are lowered as such.
+    fn lambdas(&mut self, e: &mut Expr) {
+        match &mut e.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Ident(_) => {}
+            ExprKind::Lambda { body, .. } => self.block(body),
+            ExprKind::Str(parts) => {
+                for part in parts {
+                    if let StrPart::Expr(inner) = part {
+                        self.lambdas(inner);
+                    }
+                }
+            }
+            ExprKind::List(items) => items.iter_mut().for_each(|item| self.lambdas(item)),
+            ExprKind::Map(entries) => {
+                for (key, value) in entries {
+                    self.lambdas(key);
+                    self.lambdas(value);
+                }
+            }
+            ExprKind::StructLit { fields, .. } => fields.iter_mut().for_each(|f| self.lambdas(&mut f.value)),
+            ExprKind::Unary { expr, .. } | ExprKind::Try(expr) | ExprKind::Recv(expr) => self.lambdas(expr),
+            ExprKind::Field { obj, .. } => self.lambdas(obj),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.lambdas(lhs);
+                self.lambdas(rhs);
+            }
+            ExprKind::Index { obj, index } => {
+                self.lambdas(obj);
+                self.lambdas(index);
+            }
+            ExprKind::Range { lo, hi } => {
+                self.lambdas(lo);
+                self.lambdas(hi);
+            }
+            ExprKind::Call { callee, args } => {
+                self.lambdas(callee);
+                args.iter_mut().for_each(|arg| self.lambdas(arg));
+            }
+            ExprKind::Or { expr, default } => {
+                self.lambdas(expr);
+                self.lambdas(default);
+            }
+            // The block of a `catch` is lowered with the statement it belongs to.
+            ExprKind::Catch { expr, .. } => self.lambdas(expr),
+            ExprKind::ChanNew { cap, .. } => {
+                if let Some(cap) = cap {
+                    self.lambdas(cap);
+                }
+            }
+        }
+    }
+
     /// Lowers one statement into `out` (what it needs first, then itself).
     fn stmt(&mut self, mut stmt: Stmt, out: &mut Vec<Stmt>) {
         let span = stmt.span;
+        match &mut stmt.kind {
+            StmtKind::Let { init: e, .. } | StmtKind::Expr(e) | StmtKind::Fail(e) | StmtKind::Return(Some(e)) => self.lambdas(e),
+            StmtKind::Assign { target, value, .. } => {
+                self.lambdas(target);
+                self.lambdas(value);
+            }
+            StmtKind::If { cond: e, .. } | StmtKind::While { cond: e, .. } | StmtKind::For { iter: e, .. } => self.lambdas(e),
+            StmtKind::Send { chan, value } => {
+                self.lambdas(chan);
+                self.lambdas(value);
+            }
+            _ => {}
+        }
         match &mut stmt.kind {
             StmtKind::Let { init: e, .. } | StmtKind::Expr(e) | StmtKind::Fail(e) | StmtKind::Return(Some(e)) => {
                 self.expr(e, out);

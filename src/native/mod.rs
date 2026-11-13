@@ -31,13 +31,14 @@
 //! Only the functions that are reachable from `main` are compiled.
 
 mod asm;
+mod capture;
 mod elf;
 mod lower;
 mod plan;
 mod widen;
 
 use crate::ast::*;
-use crate::checker::{method_key, Analysis, CallKind, Recv, Type};
+use crate::checker::{lambda_key, method_key, Analysis, CallKind, Recv, Type};
 use crate::diagnostics::{Diagnostic, Span};
 use asm::*;
 use plan::{VarKey, COUNTER, NAMED, SUBJECT};
@@ -70,6 +71,7 @@ const SELF: u8 = 3;
 
 pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> Result<Vec<u8>, Vec<Diagnostic>> {
     widen::widen(program, an);
+    capture::capture(program, an);
     lower::lower(program, an);
     let (program, an) = (&*program, &*an);
     let mut g = Gen {
@@ -84,6 +86,9 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
         strings: HashMap::new(),
         descriptors: HashMap::new(),
         pending_descriptors: Vec::new(),
+        pending_closures: Vec::new(),
+        static_closures: HashMap::new(),
+        pending_statics: Vec::new(),
         caches: 0,
         div_zero: None,
         index_oob: None,
@@ -100,6 +105,7 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
 
     // Every function gets a label. Its code is only generated when something refers to it.
     let mut global_order = Vec::new();
+    let mut lambdas: Vec<&Expr> = Vec::new();
     for item in &program.items {
         match item {
             Item::Fn(f) => {
@@ -110,7 +116,9 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
                     .zip(&sig.params)
                     .map(|(p, ty)| ParamInfo { name: p.name.clone(), ty: ty.clone(), key: (p.span.start, NAMED), span: p.ty.span })
                     .collect();
-                g.add_function(f.name.clone(), FnItem { decl: f, params, ret: sig.ret.clone() });
+                lambdas_in(&f.body, &mut lambdas);
+                let item = FnItem { body: &f.body, fallible: f.fallible, span: f.name_span, params, ret: sig.ret.clone(), captures: Vec::new() };
+                g.add_function(f.name.clone(), item);
             }
             Item::Struct(s) => {
                 for m in &s.methods {
@@ -127,16 +135,37 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
                         key: (p.span.start, NAMED),
                         span: p.ty.span,
                     }));
-                    g.add_function(method_key(&s.name, &m.name), FnItem { decl: m, params, ret: sig.ret.clone() });
+                    lambdas_in(&m.body, &mut lambdas);
+                    let item = FnItem { body: &m.body, fallible: m.fallible, span: m.name_span, params, ret: sig.ret.clone(), captures: Vec::new() };
+                    g.add_function(method_key(&s.name, &m.name), item);
                 }
             }
             Item::Global(Stmt { kind: StmtKind::Let { name, init, .. }, .. }) => {
+                if let ExprKind::Lambda { .. } = &init.kind {
+                    lambdas.push(init);
+                }
+                if let ExprKind::Lambda { body, .. } = &init.kind {
+                    lambdas_in(body, &mut lambdas);
+                }
                 let offset = STATE_SIZE + 8 * global_order.len() as i32;
                 g.globals.insert(name.clone(), (offset, g.ty(init)));
                 global_order.push(name.clone());
             }
             _ => {}
         }
+    }
+    // A lambda is one more function, with a hidden extra: the closure it runs for.
+    for lambda in lambdas {
+        let ExprKind::Lambda { params, body, fallible, .. } = &lambda.kind else { continue };
+        let Type::Fn(sig) = g.ty(lambda) else { continue };
+        let params = params
+            .iter()
+            .zip(&sig.params)
+            .map(|(p, ty)| ParamInfo { name: p.name.clone(), ty: ty.clone(), key: (p.span.start, NAMED), span: p.ty.span })
+            .collect();
+        let captures = an.captures.get(&lambda.id).cloned().unwrap_or_default();
+        let item = FnItem { body, fallible: *fallible, span: lambda.span, params, ret: sig.ret.clone(), captures };
+        g.add_function(lambda_key(lambda.id), item);
     }
     g.descriptor(&Type::Str);
 
@@ -159,7 +188,7 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
         }
     }
     if let Some(main) = g.items.get("main") {
-        let can_fail = main.decl.fallible;
+        let can_fail = main.fallible;
         let label = g.function_label("main");
         g.asm.call(label);
         if can_fail {
@@ -206,13 +235,14 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
 }
 
 fn is_ref(ty: &Type) -> bool {
-    matches!(ty, Type::Str | Type::Error | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Interface(_))
+    matches!(ty, Type::Str | Type::Error | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Interface(_) | Type::Fn(_))
 }
 
 fn supported(ty: &Type) -> bool {
     match ty {
         Type::Int | Type::Float | Type::Bool | Type::Str | Type::Error | Type::Void | Type::Range | Type::Unknown => true,
         Type::Struct(_) | Type::Interface(_) => true,
+        Type::Fn(sig) => sig.params.iter().all(supported) && supported(&sig.ret),
         Type::List(elem) => supported(elem),
         Type::Map(key, value) => **key != Type::Float && supported(key) && supported(value),
         _ => false,
@@ -335,9 +365,102 @@ struct ParamInfo {
 }
 
 struct FnItem<'a> {
-    decl: &'a FnDecl,
+    body: &'a Block,
+    fallible: bool,
+    /// Where to report a problem with the return type.
+    span: Span,
     params: Vec<ParamInfo>,
     ret: Type,
+    /// For a lambda: the variables it takes from the functions around it.
+    captures: Vec<(String, Type)>,
+}
+
+/// Every lambda of a block, those nested in other lambdas included.
+fn lambdas_in<'a>(block: &'a Block, out: &mut Vec<&'a Expr>) {
+    fn stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Expr>) {
+        match &s.kind {
+            StmtKind::Let { init: e, .. } | StmtKind::Expr(e) | StmtKind::Fail(e) | StmtKind::Return(Some(e)) => expr(e, out),
+            StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::Assign { target, value, .. } => {
+                expr(target, out);
+                expr(value, out);
+            }
+            StmtKind::If { cond, then, els } => {
+                expr(cond, out);
+                lambdas_in(then, out);
+                if let Some(other) = els {
+                    stmt(other, out);
+                }
+            }
+            StmtKind::While { cond: e, body } | StmtKind::For { iter: e, body, .. } => {
+                expr(e, out);
+                lambdas_in(body, out);
+            }
+            StmtKind::Fork(body) | StmtKind::Block(body) => lambdas_in(body, out),
+            StmtKind::Send { chan, value } => {
+                expr(chan, out);
+                expr(value, out);
+            }
+        }
+    }
+    fn expr<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+        match &e.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Ident(_) => {}
+            ExprKind::Lambda { body, .. } => {
+                out.push(e);
+                lambdas_in(body, out);
+            }
+            ExprKind::Str(parts) => {
+                for part in parts {
+                    if let StrPart::Expr(inner) = part {
+                        expr(inner, out);
+                    }
+                }
+            }
+            ExprKind::List(items) => items.iter().for_each(|item| expr(item, out)),
+            ExprKind::Map(entries) => {
+                for (key, value) in entries {
+                    expr(key, out);
+                    expr(value, out);
+                }
+            }
+            ExprKind::StructLit { fields, .. } => fields.iter().for_each(|f| expr(&f.value, out)),
+            ExprKind::Unary { expr: inner, .. } | ExprKind::Try(inner) | ExprKind::Recv(inner) => expr(inner, out),
+            ExprKind::Field { obj, .. } => expr(obj, out),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                expr(lhs, out);
+                expr(rhs, out);
+            }
+            ExprKind::Index { obj, index } => {
+                expr(obj, out);
+                expr(index, out);
+            }
+            ExprKind::Range { lo, hi } => {
+                expr(lo, out);
+                expr(hi, out);
+            }
+            ExprKind::Call { callee, args } => {
+                expr(callee, out);
+                args.iter().for_each(|arg| expr(arg, out));
+            }
+            ExprKind::Or { expr: inner, default } => {
+                expr(inner, out);
+                expr(default, out);
+            }
+            ExprKind::Catch { expr: inner, body, .. } => {
+                expr(inner, out);
+                lambdas_in(body, out);
+            }
+            ExprKind::ChanNew { cap, .. } => {
+                if let Some(cap) = cap {
+                    expr(cap, out);
+                }
+            }
+        }
+    }
+    for s in &block.stmts {
+        stmt(s, out);
+    }
 }
 
 /// An argument of a call to the runtime.
@@ -386,6 +509,9 @@ struct Gen<'a> {
     /// Type (by its display name) -> its descriptor table.
     descriptors: HashMap<String, Label>,
     pending_descriptors: Vec<(Type, Label)>,
+    pending_closures: Vec<(Vec<Type>, Label)>,
+    static_closures: HashMap<String, Label>,
+    pending_statics: Vec<(String, Label)>,
     /// Number of interface call sites; each has a two-word cache after the globals.
     caches: usize,
     /// Shared pieces of code that report an error and never return.
@@ -486,7 +612,7 @@ impl<'a> Gen<'a> {
     }
 
     fn emit_descriptors(&mut self) -> bool {
-        if self.pending_descriptors.is_empty() {
+        if self.pending_descriptors.is_empty() && self.pending_closures.is_empty() && self.pending_statics.is_empty() {
             return false;
         }
         while let Some((ty, label)) = self.pending_descriptors.pop() {
@@ -542,7 +668,9 @@ impl<'a> Gen<'a> {
                         Type::Bool => 1,
                         Type::Float => 2,
                         Type::Str => 3,
-                        Type::Interface(_) => 6,
+                        // Like an interface value, a function value says
+                        // what it is itself (see `closure_descriptor`).
+                        Type::Interface(_) | Type::Fn(_) => 6,
                         _ => 0,
                     };
                     self.asm.bind(label);
@@ -550,7 +678,61 @@ impl<'a> Gen<'a> {
                 }
             }
         }
+        while let Some((captures, label)) = self.pending_closures.pop() {
+            // Laid out like the descriptor of a struct whose first field is
+            // the address of the code, so that releasing a closure is
+            // releasing a struct. Kind 9 instead of 5 tells them apart.
+            let name = self.string("fn");
+            let int = self.descriptor(&Type::Int);
+            let fields: Vec<Label> = captures.iter().map(|ty| self.descriptor(ty)).collect();
+            self.asm.align(8);
+            self.asm.bind(label);
+            self.asm.word(9);
+            self.asm.address(name);
+            self.asm.word(1 + fields.len() as u64);
+            self.asm.word(0);
+            self.asm.address(name);
+            self.asm.address(int);
+            for td in fields {
+                self.asm.address(name);
+                self.asm.address(td);
+            }
+        }
+        while let Some((key, label)) = self.pending_statics.pop() {
+            // A function that captures nothing: one constant closure, never released.
+            let td = self.closure_descriptor(&[]);
+            let code = self.function_label(&key);
+            self.asm.align(8);
+            self.asm.bind(label);
+            self.asm.half(-1i32 as u32);
+            self.asm.address32(td);
+            self.asm.address(code);
+        }
         true
+    }
+
+    /// The descriptor of closures that capture values of these types.
+    fn closure_descriptor(&mut self, captures: &[Type]) -> Label {
+        let names: Vec<String> = captures.iter().map(|ty| ty.to_string()).collect();
+        let key = format!("closure({})", names.join(", "));
+        if let Some(&label) = self.descriptors.get(&key) {
+            return label;
+        }
+        let label = self.asm.new_label();
+        self.descriptors.insert(key, label);
+        self.pending_closures.push((captures.to_vec(), label));
+        label
+    }
+
+    /// The closure of a function (or lambda) that captures nothing.
+    fn static_closure(&mut self, key: &str) -> Label {
+        if let Some(&label) = self.static_closures.get(key) {
+            return label;
+        }
+        let label = self.asm.new_label();
+        self.static_closures.insert(key.to_string(), label);
+        self.pending_statics.push((key.to_string(), label));
+        label
     }
 
     /// String constants: a header marking them as never released, then the text.
@@ -808,18 +990,18 @@ impl<'a> Gen<'a> {
     // ---- functions ----
 
     fn function(&mut self, key: &str) {
-        let (decl, params, ret) = {
+        let (body, fallible, span, params, ret, captures) = {
             let item = &self.items[key];
-            (item.decl, item.params.clone(), item.ret.clone())
+            (item.body, item.fallible, item.span, item.params.clone(), item.ret.clone(), item.captures.clone())
         };
         for p in &params {
             self.check_type(&p.ty, p.span);
         }
-        self.check_type(&ret, decl.ret.as_ref().map(|t| t.span).unwrap_or(decl.name_span));
-        self.fallible = decl.fallible;
+        self.check_type(&ret, span);
+        self.fallible = fallible;
 
         let names: Vec<(String, VarKey)> = params.iter().map(|p| (p.name.clone(), p.key)).collect();
-        let plan = plan::plan(&decl.body, &names, &VARIABLE_REGS);
+        let plan = plan::plan(body, &names, &VARIABLE_REGS);
         let mut saved: Vec<Reg> = plan.regs.values().copied().collect();
         saved.sort();
         self.regs = plan.regs;
@@ -840,6 +1022,15 @@ impl<'a> Gen<'a> {
         // The first argument was pushed first, so it is the farthest from RBP.
         let count = params.len() as i32;
         let mut scope = Vec::new();
+        // A lambda finds its closure in R10. What it captured is copied out
+        // of it; the closure, which the caller holds, keeps all of it alive.
+        for (i, (name, ty)) in captures.iter().enumerate() {
+            self.slots += 1;
+            let slot = -8 * self.slots;
+            self.asm.load(RAX, R10, FIELDS + 8 + 8 * i as i32);
+            self.asm.store(RBP, slot, RAX);
+            scope.push(Var { name: name.clone(), loc: Loc::Frame(slot), is_ref: is_ref(ty), owned: false });
+        }
         for (i, p) in params.iter().enumerate() {
             let pushed_at = 16 + 8 * (count - 1 - i as i32);
             // A parameter is borrowed from the caller, unless the function
@@ -870,16 +1061,16 @@ impl<'a> Gen<'a> {
         }
         self.scopes = vec![scope];
 
-        let last = decl.body.stmts.len().wrapping_sub(1);
-        for (i, stmt) in decl.body.stmts.iter().enumerate() {
+        let last = body.stmts.len().wrapping_sub(1);
+        for (i, stmt) in body.stmts.iter().enumerate() {
             self.at_tail = i == last;
             self.stmt(stmt);
         }
         self.at_tail = false;
-        if !leaves(&decl.body) {
+        if !leaves(body) {
             self.release_scopes(0);
         }
-        if decl.fallible {
+        if fallible {
             self.asm.mov_imm(RDX, 0); // reaching the end means success
         }
 
@@ -1696,7 +1887,11 @@ impl<'a> Gen<'a> {
                         self.retain(RAX);
                     }
                 }
-                None => self.unsupported(e.span, "functions used as values"),
+                None if self.items.contains_key(name) => {
+                    let closure = self.static_closure(name);
+                    self.asm.lea(RAX, closure);
+                }
+                None => self.unsupported(e.span, "this kind of name used as a value"),
             },
             ExprKind::List(items) => {
                 let td = self.descriptor(&ty);
@@ -1911,7 +2106,36 @@ impl<'a> Gen<'a> {
                 }
                 self.asm.pop(RAX);
             }
-            ExprKind::Lambda { .. } => self.unsupported(e.span, "lambdas"),
+            ExprKind::Lambda { .. } => {
+                let key = lambda_key(e.id);
+                let captures = self.an.captures.get(&e.id).cloned().unwrap_or_default();
+                if captures.is_empty() {
+                    let closure = self.static_closure(&key);
+                    self.asm.lea(RAX, closure);
+                    return;
+                }
+                // The closure: the address of the code, then what it captures.
+                let types: Vec<Type> = captures.iter().map(|(_, ty)| ty.clone()).collect();
+                for ty in &types {
+                    self.check_type(ty, e.span);
+                }
+                let td = self.closure_descriptor(&types);
+                self.asm.lea(RAX, td);
+                self.asm.push(RAX);
+                self.asm.push_imm(FIELDS + 8 * (1 + captures.len() as i32));
+                self.call_runtime("__rt_new", 2);
+                let code = self.function_label(&key);
+                self.asm.lea(RCX, code);
+                self.asm.store(RAX, FIELDS, RCX);
+                for (i, (name, ty)) in captures.iter().enumerate() {
+                    let Some(var) = self.lookup(name) else { continue };
+                    self.load_loc(RCX, var.loc);
+                    if is_ref(ty) {
+                        self.retain(RCX);
+                    }
+                    self.asm.store(RAX, FIELDS + 8 + 8 * i as i32, RCX);
+                }
+            }
             ExprKind::Recv(_) | ExprKind::ChanNew { .. } => self.unsupported(e.span, "channels"),
         }
     }
@@ -2462,15 +2686,18 @@ impl<'a> Gen<'a> {
                 self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
             }
+            Some(CallKind::Dynamic) if !matches!(&callee.kind, ExprKind::Field { obj, .. } if matches!(self.ty(obj), Type::Interface(_))) => {
+                // A call through a function value: the closure waits under
+                // the arguments, and travels to its code in R10.
+                let mut owned = vec![self.push_arg(callee)];
+                owned.extend(args.iter().map(|a| self.push_arg(a)));
+                self.asm.load(R10, RSP, 8 * args.len() as i32);
+                self.asm.call_mem(R10, FIELDS);
+                self.keep_error = fallible;
+                self.drop_args(&owned, has_result);
+            }
             Some(CallKind::Dynamic) => {
-                let ExprKind::Field { obj, name, .. } = &callee.kind else {
-                    self.unsupported(e.span, "calls through function values");
-                    return;
-                };
-                if !matches!(self.ty(obj), Type::Interface(_)) {
-                    self.unsupported(e.span, "calls through function values");
-                    return;
-                }
+                let ExprKind::Field { obj, name, .. } = &callee.kind else { return };
                 let mut owned = vec![self.push_arg(obj)];
                 owned.extend(args.iter().map(|a| self.push_arg(a)));
                 self.interface_call(name, args.len());
@@ -2957,6 +3184,21 @@ impl<'a> Gen<'a> {
             "reverse" => self.call_rt("__rt_list_reverse", &[Arg::Borrow(obj)], true),
             "sort" => self.call_rt("__rt_list_sort", &[Arg::Borrow(obj)], true),
             "join" => self.call_rt("__rt_list_join", &[Arg::Borrow(obj), Arg::Borrow(&args[0])], true),
+            "map" | "filter" | "sort_by" => {
+                // These run code of the program, the function they are
+                // given: nothing may be borrowed from a place it could change.
+                let owned = [self.push_arg(obj), self.push_arg(&args[0]), false];
+                let extra = match (name, self.ty(&args[0])) {
+                    ("map", _) => self.ty(e),
+                    (_, Type::Fn(sig)) => sig.ret.clone(),
+                    _ => Type::Int,
+                };
+                let td = self.descriptor(&extra);
+                self.asm.lea(RAX, td);
+                self.asm.push(RAX);
+                self.call_runtime(&format!("__rt_list_{name}"), 0);
+                self.drop_args(&owned, true);
+            }
             _ => self.unsupported(e.span, &format!("calls to the list method `{name}`")),
         }
     }
@@ -3188,6 +3430,16 @@ impl<'a> Gen<'a> {
             }
             // A float and its bits are the same 64 bits: only the type changes.
             "__bits" | "__float" => self.expr(&args[0]),
+            "__call1" => {
+                // Calls a closure with one argument.
+                self.expr(&args[0]);
+                self.asm.push(RAX);
+                self.expr(&args[1]);
+                self.asm.push(RAX);
+                self.asm.load(R10, RSP, 8);
+                self.asm.call_mem(R10, FIELDS);
+                self.asm.alu_imm(Alu::Add, RSP, 16);
+            }
             "__state" => self.asm.mov(RAX, R15),
             "__td_string" => {
                 let td = self.descriptor(&Type::Str);

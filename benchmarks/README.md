@@ -23,6 +23,7 @@ Numbers move by a few percent from run to run.
 | Program | What it stresses | Native | Node | Native executable |
 | --- | --- | ---: | ---: | ---: |
 | `alloc` | 9 million short-lived objects | 177 ms | 129 ms | 6.0 KB |
+| `closures` | 3 million calls through function values; `map`, `filter`, `sort_by` | 24 ms | 355 ms | 10.3 KB |
 | `collatz` | branches, division, multiplication | 392 ms | 1590 ms | 3.6 KB |
 | `fib` | 39 million recursive calls | 300 ms | 384 ms | 3.4 KB |
 | `loops` | nested loops, `%` by a constant | 242 ms | 295 ms | 3.5 KB |
@@ -50,8 +51,9 @@ Peak memory of the same runs:
 Things to keep in mind when reading these:
 
 - Node.js spends about 40 ms starting up; that is part of its numbers.
-- `shapes` is slow on JavaScript because of how Onyx compiles calls through
-  an interface there (each one is awaited), not because of Node.js itself.
+- `shapes` and `closures` are slow on JavaScript because of how Onyx
+  compiles calls through an interface or a function value there (each one
+  is awaited), not because of Node.js itself.
 - Node.js is ahead on two programs. On `alloc`, its engine can avoid
   creating objects that never leave a loop. On `nbody`, it keeps floats in
   processor registers from one statement to the next, while Onyx stores each

@@ -152,6 +152,22 @@ fn deep(n: int) -> int! {
     return half((half(parse_int("{half(n)?}0") or 1) or 2) * 2) or 3
 }
 
+struct Gauge {
+    level: int
+}
+
+fn drain_gauge(g: Gauge) -> int! {
+    g.level = 0
+    return half(4)?
+}
+
+// What `print` shows is what the value was when its turn came, even when a
+// later argument changes it and the statement is split around a `?`.
+fn show_then_change(g: Gauge) -> int! {
+    print(g, [g], "{g}", drain_gauge(g)?, g)
+    return g.level
+}
+
 fn main() {
     print(half(10) or 0, half(7) or -1, quarter(12) or -1, quarter(10) or -1, quarter(7) or -1)
     print(describe(8), "|", describe(6), "|", describe(3))
@@ -224,4 +240,5 @@ fn main() {
     escape(7) catch err {
         print("escape:", err)
     }
+    print(show_then_change(Gauge{level: 7}) or -1)
 }

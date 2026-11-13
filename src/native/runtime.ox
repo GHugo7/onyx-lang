@@ -2133,6 +2133,9 @@ fn __rt_repr(v: int, td: int, quoted: bool) -> string {
     if kind == 6 {
         return __rt_repr(v, __load32(v + 4), quoted)
     }
+    if kind == 9 {
+        return "fn"
+    }
     if kind == __KIND_LIST {
         var elem = __load64(td + 8)
         var count = __load64(v + 8)
@@ -2758,6 +2761,146 @@ fn __rt_list_join(list: int, separator: string) -> string {
         out += __rt_repr(__load64(data + i * 8), elem, false)
         i += 1
     }
+    return out
+}
+
+// The three methods below run a function of the program, `f`, on every
+// element. `__call1` calls it; the element is held for the time of the call,
+// since the function may well change the list.
+
+fn __rt_list_map(list: int, f: int, td: int) -> int {
+    var out = __rt_list_new(td, __load64(list + 8))
+    var refs = __rt_list_holds_refs(list)
+    var i = 0
+    while i < __load64(list + 8) {
+        var item = __load64(__load64(list + 24) + i * 8)
+        if refs {
+            __rt_retain(item)
+        }
+        __rt_list_push(out, __call1(f, item))
+        if refs {
+            __rt_release(item)
+        }
+        i += 1
+    }
+    return out
+}
+
+fn __rt_list_filter(list: int, f: int, td: int) -> int {
+    var out = __rt_list_new(__load32(list + 4), 0)
+    var refs = __rt_list_holds_refs(list)
+    var i = 0
+    while i < __load64(list + 8) {
+        var item = __load64(__load64(list + 24) + i * 8)
+        if refs {
+            __rt_retain(item)
+        }
+        if __call1(f, item) != 0 {
+            __rt_list_push(out, item)
+        } else if refs {
+            __rt_release(item)
+        }
+        i += 1
+    }
+    return out
+}
+
+// A copy sorted by the key that `f` gives for each element (an int, a float
+// or a string, as `td` says). Elements with equal keys keep their order.
+fn __rt_list_sort_by(list: int, f: int, td: int) -> int {
+    var kind = __load64(td)
+    var refs = __rt_list_holds_refs(list)
+    // Keys first, each computed once; the elements are held meanwhile.
+    var room = 4
+    var keys = __rt_alloc(room * 8)
+    var items = __rt_alloc(room * 8)
+    var n = 0
+    while n < __load64(list + 8) {
+        if n == room {
+            var more_keys = __rt_alloc(room * 16)
+            var more_items = __rt_alloc(room * 16)
+            __copy(more_keys, keys, room * 8)
+            __copy(more_items, items, room * 8)
+            __rt_free(keys, room * 8)
+            __rt_free(items, room * 8)
+            keys = more_keys
+            items = more_items
+            room = room * 2
+        }
+        var item = __load64(__load64(list + 24) + n * 8)
+        if refs {
+            __rt_retain(item)
+        }
+        __store64(items + n * 8, item)
+        __store64(keys + n * 8, __call1(f, item))
+        n += 1
+    }
+    // A merge sort on the two arrays together.
+    var keys2 = __rt_alloc(room * 8)
+    var items2 = __rt_alloc(room * 8)
+    var width = 1
+    while width < n {
+        var lo = 0
+        while lo < n {
+            var mid = lo + width
+            if mid > n {
+                mid = n
+            }
+            var hi = mid + width
+            if hi > n {
+                hi = n
+            }
+            var a = lo
+            var b = mid
+            var k = lo
+            while a < mid && b < hi {
+                var x = __load64(keys + a * 8)
+                var y = __load64(keys + b * 8)
+                var take_left = x <= y
+                if kind == __KIND_STRING {
+                    take_left = __rt_bytes_cmp(x, y) <= 0
+                } else if kind == 2 {
+                    take_left = !(__float(y) < __float(x))
+                }
+                if take_left {
+                    __store64(keys2 + k * 8, x)
+                    __store64(items2 + k * 8, __load64(items + a * 8))
+                    a += 1
+                } else {
+                    __store64(keys2 + k * 8, y)
+                    __store64(items2 + k * 8, __load64(items + b * 8))
+                    b += 1
+                }
+                k += 1
+            }
+            __copy(keys2 + k * 8, keys + a * 8, (mid - a) * 8)
+            __copy(items2 + k * 8, items + a * 8, (mid - a) * 8)
+            k += mid - a
+            __copy(keys2 + k * 8, keys + b * 8, (hi - b) * 8)
+            __copy(items2 + k * 8, items + b * 8, (hi - b) * 8)
+            lo = hi
+        }
+        var swap = keys
+        keys = keys2
+        keys2 = swap
+        swap = items
+        items = items2
+        items2 = swap
+        width = width * 2
+    }
+    var out = __rt_list_new(__load32(list + 4), n)
+    var i = 0
+    while i < n {
+        __rt_list_push(out, __load64(items + i * 8))
+        if kind == __KIND_STRING {
+            __rt_release(__load64(keys + i * 8))
+        }
+        i += 1
+    }
+    __rt_free(keys, room * 8)
+    __rt_free(items, room * 8)
+    __rt_free(keys2, room * 8)
+    __rt_free(items2, room * 8)
     return out
 }
 

@@ -35,6 +35,8 @@ The native target is being built up step by step. It currently supports:
 - error handling: functions that return `T!`, `fail`, `?`, `or`, `catch`,
   the `error` type, and a `main` that can fail
 - functions, recursion, any number of parameters
+- lambdas and closures, functions as values (in variables, fields, lists,
+  maps), and the list methods `map`, `filter` and `sort_by`
 - top-level `var` and `const`
 - `var`, assignment, `if` / `else`, `while`, `for i in a..b`, `break`,
   `continue`, `return`
@@ -48,8 +50,8 @@ The native target is being built up step by step. It currently supports:
 - `print`, `str`, `parse_int`, `abs`, `min`, `max`, `exit`, `panic`
 - modules (`import`)
 
-Anything else (lambdas, `fork`, channels, `map` / `filter` / `sort_by`,
-files, `onyx test`) is rejected with error
+Anything else (`fork`, channels, files, `args`, `input`, `onyx test`) is
+rejected with error
 `E0500` rather than compiled incorrectly. Those programs still run on the
 default JavaScript target. Functions that are never called are not compiled,
 so an unsupported feature in unused code does not get in the way.
@@ -122,6 +124,10 @@ fn main() {
 }
 ```
 
+A closure can be part of such a cycle too: a lambda stored in a variable
+that it uses itself, or in a field of an object it captures, keeps itself
+alive.
+
 A way to mark one of the links as weak is planned. Until then, avoid such
 structures in long-running programs, or break the cycle by hand before
 dropping it (`a.friends.clear()`).
@@ -171,6 +177,10 @@ In the native code generator (`src/native/mod.rs`, `src/native/plan.rs`):
   `split("")` hand out the same 128 constant strings for ASCII characters;
   only accented and other multi-byte characters are allocated. Searching
   and counting skip eight ASCII bytes at a time.
+- **Closures.** A lambda that captures nothing, like a named function used
+  as a value, is a constant: making it allocates nothing. A captured
+  variable is copied into the closure; only one that is assigned to after
+  being captured moves into a shared box.
 - **Floats.** An expression such as `a * b + c * d` is computed in the
   SSE registers from start to end. Converting an int happens where the
   checker saw one used as a float, and a literal such as the 2 of `2 * x` is
@@ -195,6 +205,7 @@ last stage differs.
 | File | Role |
 | --- | --- |
 | `src/native/widen.rs` | Makes conversions from `int` to `float` explicit |
+| `src/native/capture.rs` | Finds what each lambda captures; boxes the variables they share |
 | `src/native/lower.rs` | Rewrites statements so that every `?` stands on its own |
 | `src/native/mod.rs` | Walks the checked program and emits machine code |
 | `src/native/plan.rs` | Chooses the variables that live in registers |
@@ -215,6 +226,30 @@ It relies on a few low-level operations that only it may use: reading and
 writing memory (`__load8`, `__store64`, ...), copying bytes (`__copy`) and
 calling the kernel (`__syscall`). The layout of objects in memory is
 documented at the top of `runtime.ox`.
+
+## Closures
+
+A function value is a small object, the closure: the address of the code,
+followed by what the lambda captured from the functions around it. Calling
+it passes the closure along, in a register, so that the code finds its
+variables.
+
+```onyx
+fn counter() -> fn() -> int {
+    var n = 0
+    return fn() -> int {
+        n += 1
+        return n
+    }
+}
+```
+
+Here `n` outlives `counter` and is changed by the lambda, so it cannot stay
+in `counter`'s stack frame, and cannot simply be copied either. The compiler
+moves it into a box on the heap, which the function and the lambda both
+point to; like everything else, the box is freed when the last of them goes
+away. A captured variable that never changes afterwards is copied instead,
+which costs nothing more.
 
 ## Floats as text
 
@@ -241,9 +276,8 @@ They were compared with Node.js on tens of thousands of random floats.
 
 ## Roadmap for this target
 
-1. Lambdas and closures, and with them `map`, `filter` and `sort_by`
-2. Files, arguments, `input`
-3. `fork` and channels
-4. Weak references, to break cycles
-5. Float variables in registers
-6. Other systems (ARM64, Windows, macOS)
+1. Files, arguments, `input`
+2. `fork` and channels
+3. Weak references, to break cycles
+4. Float variables in registers
+5. Other systems (ARM64, Windows, macOS)

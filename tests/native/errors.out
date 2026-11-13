@@ -21,3 +21,5 @@ y x x ["x"]
 cannot convert "four" to int
 1 -100 -100 10 -100
 escape: 7 is odd
+Gauge{level: 7} [Gauge{level: 7}] Gauge{level: 7} 2 Gauge{level: 0}
+0

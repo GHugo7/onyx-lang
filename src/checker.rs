@@ -127,6 +127,9 @@ pub struct Analysis {
     pub fallible_calls: HashSet<usize>,
     /// Expressions of type `int` whose value is used as a `float`.
     pub widened: HashSet<usize>,
+    /// Filled in by the native target: for each lambda, the variables of the
+    /// functions around it that it uses, with their types.
+    pub captures: HashMap<usize, Vec<(String, Type)>>,
 }
 
 pub fn fn_key(name: &str) -> String {
@@ -170,6 +173,7 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "__store8" | "__store32" | "__store64" => (vec![Int, Int], Void, false, false),
         "__copy" => (vec![Int, Int, Int], Void, false, false),
         "__and" | "__or" | "__xor" | "__shl" | "__shr" | "__sar" => (vec![Int, Int], Int, false, false),
+        "__call1" => (vec![Int, Int], Int, false, false),
         "__bits" => (vec![Float], Int, false, false),
         "__float" => (vec![Int], Float, false, false),
         "__state" => (vec![], Int, false, false),

@@ -156,6 +156,30 @@ fn average(xs: [float]) -> float {
     return total / xs.len()
 }
 
+fn apply(f: fn(int) -> int, n: int) -> int {
+    return f(n) % 1000003
+}
+
+fn twice(f: fn(int) -> int) -> fn(int) -> int {
+    return fn(n: int) -> int {
+        return f(f(n) % 1000) % 1000003
+    }
+}
+
+fn stepper(step: int) -> fn() -> int {
+    var at = 0
+    return fn() -> int {
+        at = (at + step) % 1000
+        return at
+    }
+}
+
+fn negate(n: int) -> int {
+    return -n
+}
+
+var g_ops: [fn(int) -> int] = [negate]
+var g_step = stepper(7)
 var g_ratio = 1.5
 var g_floats: [float] = [0.5, 2, -1.25]
 var g_sample = Sample{label: "s", value: 3, history: []}
@@ -981,7 +1005,8 @@ impl Gen {
 
     fn stmt(&mut self) {
         self.budget -= 1;
-        match self.rng.below(35) {
+        match self.rng.below(39) {
+            35..=38 => self.closure_op(),
             31..=34 => self.float_op(),
             26 | 27 => self.catch_stmt(),
             28..=30 => self.map_op(),
@@ -1589,6 +1614,117 @@ impl Gen {
                     self.line("}");
                 }
             },
+        }
+    }
+
+    /// Lambdas: made, stored, called, given to `map`, `filter` and `sort_by`.
+    fn closure_op(&mut self) {
+        let e = self.calmly(|g| g.bounded_int(2));
+        let k = self.rng.between(-20, 20);
+        // Something the lambda captures: a variable of the function, or nothing.
+        let captured = match self.some_var(Ty::Int) {
+            Some(v) if self.rng.chance(70) => v.name,
+            _ => k.to_string(),
+        };
+        match self.rng.below(13) {
+            0 | 1 => {
+                // A lambda that reads a variable and changes another.
+                let (count, f) = (self.fresh("h"), self.fresh("fn"));
+                self.line(&format!("var {count} = 0"));
+                self.line(&format!("var {f} = fn(n: int) -> int {{"));
+                self.line(&format!("    {count} += 1"));
+                self.line(&format!("    return (n % 1000 + {captured} % 1000 + {count}) % 1000"));
+                self.line("}");
+                self.line(&format!("print({f}({e}), {f}({k}), apply({f}, {count}), {count}, twice({f})(3))"));
+                if self.rng.chance(40) {
+                    self.line("if g_ops.len() < 8 {");
+                    self.line(&format!("    g_ops.push({f})"));
+                    self.line("}");
+                }
+            }
+            2 => {
+                let at = self.rng.between(0, 5);
+                self.line(&format!("if g_ops.len() > {at} {{"));
+                self.line(&format!("    g_count = (g_count + abs(g_ops[{at}]({e})) % 1000) % 1000"));
+                self.line("}");
+            }
+            3 => self.line(&format!("print(g_step(), apply(negate, {e}), apply(twice(negate), {k}), g_ops.len())")),
+            4 => {
+                let name = self.fresh("s");
+                self.line(&format!("var {name} = stepper({k})"));
+                self.line(&format!("print({name}(), {name}(), {name}() + g_step())"));
+            }
+            5 | 6 => {
+                let (xs, _) = self.calmly(|g| g.ints(2));
+                let method = self.rng.pick(&[
+                    "map(fn(n: int) -> int {\n{pad}    return n % 97 + {c}\n{pad}})",
+                    "filter(fn(n: int) -> bool {\n{pad}    return n % 3 != {c} % 3\n{pad}})",
+                    "sort_by(fn(n: int) -> int {\n{pad}    return -n\n{pad}})",
+                    "sort_by(fn(n: int) -> string {\n{pad}    return str(n % 10)\n{pad}})",
+                    "map(fn(n: int) -> string {\n{pad}    return \"<\" + str(n % 100) + \">\"\n{pad}})",
+                    "map(fn(n: int) -> float {\n{pad}    return n % 8 / 2.0\n{pad}})",
+                    "map(negate)",
+                ]);
+                let pad = "    ".repeat(self.indent);
+                let call = method.replace("{pad}", &pad).replace("{c}", &captured);
+                self.line(&format!("print({xs}.slice(0, 6).{call})"));
+            }
+            7 => {
+                let (ss, _) = self.calmly(|g| g.strs(2));
+                let pad = "    ".repeat(self.indent);
+                self.line(&format!("print({ss}.slice(0, 6).map(fn(s: string) -> int {{"));
+                self.line(&format!("    return s.len() + {captured} % 10"));
+                self.line(&format!("}}), {ss}.slice(0, 6).sort_by(fn(s: string) -> int {{"));
+                self.line("    return s.len()");
+                self.line("}).len())");
+                let _ = pad;
+            }
+            8 => {
+                // Captured strings and lists.
+                let (log, add) = (self.fresh("log"), self.fresh("add"));
+                let text = self.rng.pick(TEXTS);
+                self.line(&format!("var {log}: [string] = []"));
+                self.line(&format!("var {add} = fn(s: string) {{"));
+                self.line(&format!("    {log}.push(s + {text})"));
+                self.line("    g_count = (g_count + s.len()) % 1000");
+                self.line("}");
+                self.line(&format!("{add}(\"a\")"));
+                self.line(&format!("{add}(str({e}))"));
+                self.line(&format!("print({log}, {log}.len())"));
+            }
+            9 => {
+                // A lambda that can fail.
+                let f = self.fresh("try");
+                self.line(&format!("var {f} = fn(n: int) -> int! {{"));
+                self.line(&format!("    return half(n)? + {captured} % 100"));
+                self.line("}");
+                self.line(&format!("print({f}({e}) or -1, {f}(4) or -2)"));
+                self.line(&format!("{f}(3) catch err {{"));
+                self.line("    g_text += \"e\"");
+                self.line("}");
+            }
+            10 => {
+                let pts = self.fresh("pts");
+                self.line(&format!("var {pts} = team.members.slice(0, 5).sort_by(fn(p: Point) -> int {{"));
+                self.line("    return p.x % 100");
+                self.line("}).map(fn(p: Point) -> string {");
+                self.line(&format!("    return p.name + str({captured} % 10)"));
+                self.line("})");
+                self.line(&format!("print({pts})"));
+            }
+            11 => {
+                // The lambda and the function both change the variable.
+                let (acc, f) = (self.fresh("acc"), self.fresh("fn"));
+                self.line(&format!("var {acc} = {k}"));
+                self.line(&format!("var {f} = fn() {{"));
+                self.line(&format!("    {acc} = ({acc} * 3 + 1) % 1000"));
+                self.line("}");
+                self.line(&format!("{f}()"));
+                self.line(&format!("{acc} += 5"));
+                self.line(&format!("{f}()"));
+                self.line(&format!("print({acc})"));
+            }
+            _ => self.line("print(g_ops.map(fn(f: fn(int) -> int) -> int {\n        return f(3) % 1000\n    }).len(), g_ops.len())"),
         }
     }
 

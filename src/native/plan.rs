@@ -188,6 +188,9 @@ impl Planner {
                 self.expr(index);
             }
             ExprKind::Lambda { params, body, .. } => {
+                // A lambda is a function of its own, planned separately: its
+                // variables are followed here only to tell names apart.
+                let first = self.vars.len();
                 self.scopes.push(HashMap::new());
                 for p in params {
                     self.declare(Some(&p.name), (p.span.start, NAMED), 0);
@@ -196,6 +199,9 @@ impl Planner {
                     self.stmt(stmt);
                 }
                 self.scopes.pop();
+                for var in &mut self.vars[first..] {
+                    var.weight = 0;
+                }
             }
             ExprKind::Or { expr, default } => {
                 self.expr(expr);

@@ -1,0 +1,25 @@
+8 10 12 14 16 fn
+81 9 36 18
+6 11 101 15
+hello, Ada! hello, Grace!
+1 2 3 1 4
+150 120 121 -79
+>a >ab >abc
+2 1 0
+13
+612 4 306 [fn, fn, fn, fn]
+1 2 11 25 30
+OK! OK! 2
+CANCEL! cancel DIRECT!
+add5 11
+double 12
+square 36
+30 -1 30 -1
+caught: 99 is over 5
+["[info] starting", "[warn] careful", "[info] done"]
+14 24 20
+[10, 6, 16, 2, 18, 4] [5, 8, 9] ["<5>", "<3>", "<8>", "<1>", "<9>", "<2>"]
+[9, 8, 5, 3, 2, 1] [2.5, 1.5, 4.0, 0.5, 4.5, 1.0] [] [5, 3, 8, 1, 9, 2]
+["Dan", "Cleo", "Bea", "Abe"] [44, 31, 31, 19] ["Abe", "Cleo", "Bea", "Dan"]
+3 ["Cleo", "Abe", "Bea"] 106 ["a", "b", "c"] [14]
+[] [] ["yy"]
