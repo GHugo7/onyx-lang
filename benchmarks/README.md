@@ -22,17 +22,18 @@ Numbers move by a few percent from run to run.
 
 | Program | What it stresses | Native | Node | Native executable |
 | --- | --- | ---: | ---: | ---: |
-| `alloc` | 9 million short-lived objects | 153 ms | 177 ms | 5.9 KB |
-| `collatz` | branches, division, multiplication | 372 ms | 1583 ms | 3.6 KB |
-| `fib` | 39 million recursive calls | 296 ms | 385 ms | 3.4 KB |
-| `loops` | nested loops, `%` by a constant | 198 ms | 330 ms | 3.5 KB |
-| `maps` | a million insertions, two million lookups | 223 ms | 434 ms | 11.2 KB |
-| `print` | 500 000 lines of output | 19 ms | 533 ms | 3.4 KB |
-| `shapes` | 5 million calls through an interface | 22 ms | 474 ms | 5.6 KB |
-| `sieve` | list reads and writes | 124 ms | 312 ms | 5.8 KB |
-| `sort` | sorting a million integers | 173 ms | 659 ms | 7.6 KB |
-| `strings` | building a long string, comparing | 18 ms | 64 ms | 6.1 KB |
-| `structs` | 5 million method calls on structs | 19 ms | 60 ms | 5.4 KB |
+| `alloc` | 9 million short-lived objects | 177 ms | 129 ms | 6.0 KB |
+| `collatz` | branches, division, multiplication | 392 ms | 1590 ms | 3.6 KB |
+| `fib` | 39 million recursive calls | 300 ms | 384 ms | 3.4 KB |
+| `loops` | nested loops, `%` by a constant | 242 ms | 295 ms | 3.5 KB |
+| `maps` | a million insertions, two million lookups | 170 ms | 339 ms | 16.0 KB |
+| `nbody` | float arithmetic and square roots | 105 ms | 51 ms | 13.1 KB |
+| `print` | 500 000 lines of output | 20 ms | 563 ms | 3.4 KB |
+| `shapes` | 5 million calls through an interface | 21 ms | 410 ms | 5.6 KB |
+| `sieve` | list reads and writes | 112 ms | 250 ms | 5.8 KB |
+| `sort` | sorting a million integers | 174 ms | 559 ms | 7.7 KB |
+| `strings` | building a long string, comparing | 15 ms | 46 ms | 6.1 KB |
+| `structs` | 5 million method calls on structs | 15 ms | 48 ms | 5.4 KB |
 
 Peak memory of the same runs:
 
@@ -51,8 +52,10 @@ Things to keep in mind when reading these:
 - Node.js spends about 40 ms starting up; that is part of its numbers.
 - `shapes` is slow on JavaScript because of how Onyx compiles calls through
   an interface there (each one is awaited), not because of Node.js itself.
-- `alloc` is the closest of them: the JavaScript engine can avoid creating
-  objects that never leave a loop.
+- Node.js is ahead on two programs. On `alloc`, its engine can avoid
+  creating objects that never leave a loop. On `nbody`, it keeps floats in
+  processor registers from one statement to the next, while Onyx stores each
+  variable back to memory; float variables in registers are on the roadmap.
 
 ## History
 

@@ -230,7 +230,7 @@ mod native {
 
     #[test]
     fn unsupported_features_are_reported_not_miscompiled() {
-        let out = run_source("float.ox", "fn main() {\n    var half = 0.5\n    print(half)\n}\n");
+        let out = run_source("lambda.ox", "fn main() {\n    var twice = fn(n: int) -> int {\n        return n * 2\n    }\n    print(twice(2))\n}\n");
         assert_eq!(out.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&out.stderr).contains("error[E0500]"));
     }

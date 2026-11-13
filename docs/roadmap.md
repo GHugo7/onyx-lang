@@ -23,15 +23,17 @@ for what works today.
    instead of a garbage collector.
 3. **An optimising code generator** (done): variables in registers, no
    division instruction for constants, strings that grow in place, buffered
-   output. Native programs now run faster than the JavaScript ones on every
-   [benchmark](../benchmarks/README.md), in a fraction of the memory.
+   output. Native programs now run faster than the JavaScript ones on most
+   [benchmarks](../benchmarks/README.md), in a fraction of the memory.
 4. **Error handling** (done): `!`, `fail`, `?`, `or` and `catch`, without
    exceptions.
 5. **Strings** (done): every string method, indexing and loops over
    characters, counted in characters rather than bytes.
-6. **The rest of the language** on the native target: floats, lambdas,
-   files, `fork` and channels.
-7. **Self-hosting**: the compiler rewritten in Onyx.
+6. **Floats** (done): arithmetic in the SSE registers, exact reading and
+   writing of decimal numbers, `pow`, all written without a C library.
+7. **The rest of the language** on the native target: lambdas, files,
+   `fork` and channels.
+8. **Self-hosting**: the compiler rewritten in Onyx.
 
 ## Later
 
@@ -54,8 +56,6 @@ for what works today.
 These concern the JavaScript target; see [native.md](native.md) for the native one.
 
 - `int` is a JavaScript number: exact up to 2^53, not a 64-bit integer.
-- A float that holds a whole number prints as `2.0` on its own, but as `2`
-  inside a list, map or struct.
 - Tasks started with `fork` take turns on a single thread (like `async` in
   JavaScript). They run in parallel while waiting on I/O or `sleep`, not while
   computing.

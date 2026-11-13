@@ -28,6 +28,7 @@ pub const R15: Reg = 15;
 #[derive(Clone, Copy, PartialEq)]
 pub enum Alu {
     Add = 0,
+    Or = 1,
     And = 4,
     Sub = 5,
     Xor = 6,
@@ -64,6 +65,13 @@ pub enum Cc {
     Ae = 0x3,
     E = 0x4,
     Ne = 0x5,
+    /// Unsigned below or equal.
+    Be = 0x6,
+    /// Unsigned above.
+    A = 0x7,
+    /// Parity: after comparing floats, one of them is not a number.
+    P = 0xA,
+    Np = 0xB,
     L = 0xC,
     Ge = 0xD,
     Le = 0xE,
@@ -78,6 +86,10 @@ impl Cc {
             Cc::Ae => Cc::B,
             Cc::E => Cc::Ne,
             Cc::Ne => Cc::E,
+            Cc::Be => Cc::A,
+            Cc::A => Cc::Be,
+            Cc::P => Cc::Np,
+            Cc::Np => Cc::P,
             Cc::L => Cc::Ge,
             Cc::Ge => Cc::L,
             Cc::Le => Cc::G,
@@ -95,6 +107,22 @@ impl Cc {
             other => other,
         }
     }
+}
+
+/// The registers that hold floating-point numbers while they are computed.
+pub type Xmm = u8;
+pub const XMM0: Xmm = 0;
+pub const XMM1: Xmm = 1;
+
+/// Operations on 64-bit floats. The value is the opcode byte after `F2 0F`.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Sse {
+    Mov = 0x10,
+    Sqrt = 0x51,
+    Add = 0x58,
+    Mul = 0x59,
+    Sub = 0x5C,
+    Div = 0x5E,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -506,6 +534,77 @@ impl Asm {
         self.buf.push(count);
     }
 
+    /// Shifts `r` by the number of bits in CL.
+    pub fn shift_cl(&mut self, kind: Shift, r: Reg) {
+        self.rex_w(0, 0, r);
+        self.buf.push(0xD3);
+        self.rr(kind as u8, r);
+    }
+
+    // ---- floats ----
+    //
+    // A float travels through the generated code as its 64 bits, in the
+    // ordinary registers. It moves to an XMM register to be computed with.
+
+    /// `dst = the float whose bits are in src`
+    pub fn movq_in(&mut self, dst: Xmm, src: Reg) {
+        self.buf.push(0x66);
+        self.rex_w(dst, 0, src);
+        self.buf.extend_from_slice(&[0x0F, 0x6E]);
+        self.rr(dst, src);
+    }
+
+    /// `dst = the bits of the float in src`
+    pub fn movq_out(&mut self, dst: Reg, src: Xmm) {
+        self.buf.push(0x66);
+        self.rex_w(src, 0, dst);
+        self.buf.extend_from_slice(&[0x0F, 0x7E]);
+        self.rr(src, dst);
+    }
+
+    /// `dst = dst op src` (`dst = src` for `Mov`, `dst = sqrt(src)` for `Sqrt`)
+    pub fn sse(&mut self, op: Sse, dst: Xmm, src: Xmm) {
+        self.buf.extend_from_slice(&[0xF2, 0x0F, op as u8]);
+        self.rr(dst, src);
+    }
+
+    /// `dst = dst op [base + disp]`
+    pub fn sse_load(&mut self, op: Sse, dst: Xmm, base: Reg, disp: i32) {
+        self.buf.push(0xF2);
+        self.rex_opt(dst, 0, base);
+        self.buf.extend_from_slice(&[0x0F, op as u8]);
+        self.mem(dst, base, disp);
+    }
+
+    /// Compares two floats. The flags come out as for unsigned integers
+    /// (`A`, `Ae`, `B`, `Be`, `E`), with `P` set when one is not a number.
+    pub fn ucomisd(&mut self, a: Xmm, b: Xmm) {
+        self.buf.extend_from_slice(&[0x66, 0x0F, 0x2E]);
+        self.rr(a, b);
+    }
+
+    /// `dst = src as a float`
+    pub fn cvtsi2sd(&mut self, dst: Xmm, src: Reg) {
+        self.buf.push(0xF2);
+        self.rex_w(dst, 0, src);
+        self.buf.extend_from_slice(&[0x0F, 0x2A]);
+        self.rr(dst, src);
+    }
+
+    /// `dst = src without its decimals`
+    pub fn cvttsd2si(&mut self, dst: Reg, src: Xmm) {
+        self.buf.push(0xF2);
+        self.rex_w(dst, 0, src);
+        self.buf.extend_from_slice(&[0x0F, 0x2C]);
+        self.rr(dst, src);
+    }
+
+    /// `dst = dst xor src`, on all the bits of the registers.
+    pub fn pxor(&mut self, dst: Xmm, src: Xmm) {
+        self.buf.extend_from_slice(&[0x66, 0x0F, 0xEF]);
+        self.rr(dst, src);
+    }
+
     /// `rax = condition ? 1 : 0`, using the flags of the previous comparison.
     pub fn setcc(&mut self, cc: Cc) {
         self.buf.extend_from_slice(&[0x0F, 0x90 | cc as u8, 0xC0]); // setcc al
@@ -711,6 +810,39 @@ mod tests {
         assert_eq!(emit(|a| a.store_at(RDI, RCX, -8, R9, true)), [0x4C, 0x89, 0x4C, 0x0F, 0xF8]);
         assert_eq!(emit(|a| a.load_at(R9, RSI, RCX, -4, false)), [0x44, 0x8B, 0x4C, 0x0E, 0xFC]);
         assert_eq!(emit(|a| a.store_at(RDI, RCX, -4, R9, false)), [0x44, 0x89, 0x4C, 0x0F, 0xFC]);
+    }
+
+    #[test]
+    fn float_encodings() {
+        assert_eq!(emit(|a| a.movq_in(XMM0, RAX)), [0x66, 0x48, 0x0F, 0x6E, 0xC0]);
+        assert_eq!(emit(|a| a.movq_in(XMM1, RCX)), [0x66, 0x48, 0x0F, 0x6E, 0xC9]);
+        assert_eq!(emit(|a| a.movq_in(XMM1, R12)), [0x66, 0x49, 0x0F, 0x6E, 0xCC]);
+        assert_eq!(emit(|a| a.movq_out(RAX, XMM0)), [0x66, 0x48, 0x0F, 0x7E, 0xC0]);
+        assert_eq!(emit(|a| a.movq_out(R8, XMM1)), [0x66, 0x49, 0x0F, 0x7E, 0xC8]);
+        assert_eq!(emit(|a| a.sse(Sse::Add, XMM0, XMM1)), [0xF2, 0x0F, 0x58, 0xC1]);
+        assert_eq!(emit(|a| a.sse(Sse::Sub, XMM0, XMM1)), [0xF2, 0x0F, 0x5C, 0xC1]);
+        assert_eq!(emit(|a| a.sse(Sse::Mul, XMM0, XMM1)), [0xF2, 0x0F, 0x59, 0xC1]);
+        assert_eq!(emit(|a| a.sse(Sse::Div, XMM0, XMM1)), [0xF2, 0x0F, 0x5E, 0xC1]);
+        assert_eq!(emit(|a| a.sse(Sse::Sqrt, XMM0, XMM0)), [0xF2, 0x0F, 0x51, 0xC0]);
+        assert_eq!(emit(|a| a.sse_load(Sse::Add, XMM0, RBP, -16)), [0xF2, 0x0F, 0x58, 0x45, 0xF0]);
+        assert_eq!(emit(|a| a.sse_load(Sse::Mul, XMM0, R15, 4104)), [0xF2, 0x41, 0x0F, 0x59, 0x87, 0x08, 0x10, 0, 0]);
+        assert_eq!(emit(|a| a.sse_load(Sse::Sub, XMM1, RSP, 0)), [0xF2, 0x0F, 0x5C, 0x0C, 0x24]);
+        assert_eq!(emit(|a| a.sse_load(Sse::Mov, XMM0, RBP, -8)), [0xF2, 0x0F, 0x10, 0x45, 0xF8]);
+        assert_eq!(emit(|a| a.ucomisd(XMM0, XMM1)), [0x66, 0x0F, 0x2E, 0xC1]);
+        assert_eq!(emit(|a| a.ucomisd(XMM1, XMM0)), [0x66, 0x0F, 0x2E, 0xC8]);
+        assert_eq!(emit(|a| a.cvtsi2sd(XMM0, RAX)), [0xF2, 0x48, 0x0F, 0x2A, 0xC0]);
+        assert_eq!(emit(|a| a.cvtsi2sd(XMM1, RCX)), [0xF2, 0x48, 0x0F, 0x2A, 0xC9]);
+        assert_eq!(emit(|a| a.cvttsd2si(RAX, XMM0)), [0xF2, 0x48, 0x0F, 0x2C, 0xC0]);
+        assert_eq!(emit(|a| a.pxor(XMM0, XMM0)), [0x66, 0x0F, 0xEF, 0xC0]);
+        assert_eq!(emit(|a| a.shift_cl(Shift::Left, RAX)), [0x48, 0xD3, 0xE0]);
+        assert_eq!(emit(|a| a.shift_cl(Shift::Right, RAX)), [0x48, 0xD3, 0xE8]);
+        assert_eq!(emit(|a| a.shift_cl(Shift::RightSigned, RAX)), [0x48, 0xD3, 0xF8]);
+        assert_eq!(emit(|a| a.alu(Alu::Or, RAX, RCX)), [0x48, 0x09, 0xC8]);
+        let mut asm = Asm::default();
+        let (above, parity) = (asm.jcc_short(Cc::A), asm.jcc_short(Cc::P));
+        asm.bind_short(parity);
+        asm.bind_short(above);
+        assert_eq!(asm.buf, [0x77, 0x02, 0x7A, 0x00]);
     }
 
     #[test]

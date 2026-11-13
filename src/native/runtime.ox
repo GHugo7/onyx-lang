@@ -65,6 +65,9 @@ const __S_TERMINAL = 40    // 1 when standard output is a terminal, 2 when it is
 const __S_CHARS = 48       // address of the 128 one-character ASCII strings, once made
 const __S_FREE = 56        // free blocks of n bytes are chained from __S_FREE + n
 
+const __S_SCRATCH = 1088   // address of the working memory of float conversions, once made
+const __S_RANDOM = 1096    // state of the random number generator
+
 const __SMALL = 1024       // blocks up to this size come from chunks
 const __CHUNK = 1048576
 const __OUT_SIZE = 65536
@@ -1084,6 +1087,1025 @@ fn __rt_quote(p: int) -> string {
     return __ptr_str(out)
 }
 
+// ---- floats ----
+//
+// A float is 64 bits: a sign, 11 bits of exponent and 52 bits of fraction
+// (IEEE 754). `__bits` and `__float` give access to them.
+
+fn __rt_floor(x: float) -> int {
+    var whole = int(x)
+    if float(whole) > x {
+        return whole - 1
+    }
+    return whole
+}
+
+fn __rt_ceil(x: float) -> int {
+    var whole = int(x)
+    if float(whole) < x {
+        return whole + 1
+    }
+    return whole
+}
+
+// The nearest int; halves go up.
+fn __rt_round_float(x: float) -> int {
+    var down = __rt_floor(x)
+    if x - float(down) >= 0.5 {
+        return down + 1
+    }
+    return down
+}
+
+fn __rt_float_min(a: float, b: float) -> float {
+    if a != a {
+        return a
+    }
+    if b != b || b < a {
+        return b
+    }
+    if a < b {
+        return a
+    }
+    // Equal: of the two zeros, the negative one is the smaller.
+    if __bits(a) < 0 {
+        return a
+    }
+    return b
+}
+
+fn __rt_float_max(a: float, b: float) -> float {
+    if a != a {
+        return a
+    }
+    if b != b || b > a {
+        return b
+    }
+    if a > b {
+        return a
+    }
+    if __bits(a) < 0 {
+        return b
+    }
+    return a
+}
+
+// Random numbers: the generator "xorshift", started from 8 random bytes
+// that the kernel gives (system call 318, getrandom).
+fn __rt_random_bits() -> int {
+    var slot = __state() + __S_RANDOM
+    var x = __load64(slot)
+    if x == 0 {
+        __syscall(318, slot, 8, 0, 0, 0, 0)
+        x = __load64(slot)
+        if x == 0 {
+            x = 88172645463325252
+        }
+    }
+    x = __xor(x, __shl(x, 13))
+    x = __xor(x, __shr(x, 7))
+    x = __xor(x, __shl(x, 17))
+    __store64(slot, x)
+    return x
+}
+
+// Between 0 (included) and 1 (excluded): 53 random bits over 2^53.
+fn __rt_random() -> float {
+    return float(__shr(__rt_random_bits(), 11)) / 9007199254740992.0
+}
+
+fn __rt_random_int(lo: int, hi: int) -> int {
+    return lo + __rt_floor(__rt_random() * float(hi - lo + 1))
+}
+
+// ---- big numbers ----
+//
+// Writing a float in decimal and reading one back have to be exact, and
+// 64 bits are not enough for that: 1e300 has a thousand bits. A big number
+// is a count followed by that many "limbs" of 32 bits, lowest first, each in
+// an 8-byte word. They live in a working area that is allocated once.
+
+const __BIG_SIZE = 1160     // room for 144 limbs
+
+fn __rt_big(i: int) -> int {
+    var slot = __state() + __S_SCRATCH
+    var area = __load64(slot)
+    if area == 0 {
+        area = __rt_alloc(8192)
+        __store64(slot, area)
+    }
+    return area + i * __BIG_SIZE
+}
+
+// a = v, which is not negative
+fn __big_set(a: int, v: int) {
+    var n = 0
+    while v > 0 {
+        __store64(a + 8 + n * 8, __and(v, 4294967295))
+        v = __shr(v, 32)
+        n += 1
+    }
+    __store64(a, n)
+}
+
+fn __big_copy(to: int, from: int) {
+    __copy(to, from, 8 + __load64(from) * 8)
+}
+
+// a = a * k + extra, for k up to 2^31 and extra below 2^31
+fn __big_mul(a: int, k: int, extra: int) {
+    var n = __load64(a)
+    var carry = extra
+    var i = 0
+    while i < n {
+        var at = a + 8 + i * 8
+        var v = __load64(at) * k + carry
+        __store64(at, __and(v, 4294967295))
+        carry = __shr(v, 32)
+        i += 1
+    }
+    if carry > 0 {
+        __store64(a + 8 + n * 8, carry)
+        __store64(a, n + 1)
+    }
+}
+
+// a = a * 2^bits
+fn __big_shl(a: int, bits: int) {
+    if __load64(a) == 0 {
+        return
+    }
+    var rest = bits % 32
+    if rest > 0 {
+        __big_mul(a, __shl(1, rest), 0)
+    }
+    var words = bits / 32
+    if words > 0 {
+        var n = __load64(a)
+        var i = n - 1
+        while i >= 0 {
+            __store64(a + 8 + (i + words) * 8, __load64(a + 8 + i * 8))
+            i -= 1
+        }
+        i = 0
+        while i < words {
+            __store64(a + 8 + i * 8, 0)
+            i += 1
+        }
+        __store64(a, n + words)
+    }
+}
+
+// a = a * 10^n
+fn __big_pow10(a: int, n: int) {
+    while n >= 9 {
+        __big_mul(a, 1000000000, 0)
+        n -= 9
+    }
+    var k = 1
+    while n > 0 {
+        k *= 10
+        n -= 1
+    }
+    if k > 1 {
+        __big_mul(a, k, 0)
+    }
+}
+
+// Negative, zero or positive, like a - b.
+fn __big_cmp(a: int, b: int) -> int {
+    var n = __load64(a)
+    if n != __load64(b) {
+        return n - __load64(b)
+    }
+    var i = n - 1
+    while i >= 0 {
+        var d = __load64(a + 8 + i * 8) - __load64(b + 8 + i * 8)
+        if d != 0 {
+            return d
+        }
+        i -= 1
+    }
+    return 0
+}
+
+// a = a + b
+fn __big_add(a: int, b: int) {
+    var n = __load64(a)
+    var m = __load64(b)
+    var carry = 0
+    var i = 0
+    while i < m || carry > 0 {
+        var v = carry
+        if i < n {
+            v += __load64(a + 8 + i * 8)
+        }
+        if i < m {
+            v += __load64(b + 8 + i * 8)
+        }
+        __store64(a + 8 + i * 8, __and(v, 4294967295))
+        carry = __shr(v, 32)
+        i += 1
+    }
+    if i > n {
+        __store64(a, i)
+    }
+}
+
+// a = a - b, where a is not smaller than b
+fn __big_sub(a: int, b: int) {
+    var n = __load64(a)
+    var m = __load64(b)
+    var borrow = 0
+    var i = 0
+    while i < n {
+        var v = __load64(a + 8 + i * 8) - borrow
+        if i < m {
+            v -= __load64(b + 8 + i * 8)
+        }
+        borrow = 0
+        if v < 0 {
+            v += 4294967296
+            borrow = 1
+        }
+        __store64(a + 8 + i * 8, v)
+        i += 1
+    }
+    while n > 0 && __load64(a + 8 + (n - 1) * 8) == 0 {
+        n -= 1
+    }
+    __store64(a, n)
+}
+
+// Number of bits of a: 0 for zero, 3 for 5 (101 in binary).
+fn __big_bits(a: int) -> int {
+    var n = __load64(a)
+    if n == 0 {
+        return 0
+    }
+    var top = __load64(a + 8 + (n - 1) * 8)
+    var bits = (n - 1) * 32
+    while top > 0 {
+        bits += 1
+        top = __shr(top, 1)
+    }
+    return bits
+}
+
+// ---- floats as text ----
+
+// Finds the shortest series of decimal digits that no other float is nearer
+// to: the float 0.1 is really 0.1000000000000000055511151231257827..., but
+// "1" (with an exponent of 0) is enough to tell it from its neighbours.
+// `bits` are those of a positive, finite float. The digits are written at
+// `out` (17 at most); returns their count plus 100 * (n + 1000), where n
+// places the decimal point: the value is 0.DIGITS * 10^n.
+//
+// This is the algorithm of Steele & White and of Burger & Dybvig ("Printing
+// Floating-Point Numbers Quickly and Accurately", 1996), which works with
+// exact fractions r / s and the half-distances to the neighbours, m+ and m-.
+fn __rt_float_digits(bits: int, out: int) -> int {
+    var fraction = __and(bits, 4503599627370495)
+    var exponent = __and(__shr(bits, 52), 2047)
+    // The float is f * 2^e, with a whole number f.
+    var f = fraction
+    var e = -1074
+    if exponent > 0 {
+        f = fraction + 4503599627370496
+        e = exponent - 1075
+    }
+    var even = f % 2 == 0
+    var r = __rt_big(0)
+    var s = __rt_big(1)
+    var above = __rt_big(2)
+    var below = __rt_big(3)
+    var t = __rt_big(4)
+    __big_set(r, f)
+    __big_set(s, 1)
+    __big_set(above, 1)
+    __big_set(below, 1)
+    if e >= 0 {
+        __big_shl(r, e + 1)
+        __big_shl(s, 1)
+        __big_shl(above, e)
+        __big_shl(below, e)
+    } else {
+        __big_shl(r, 1)
+        __big_shl(s, 1 - e)
+    }
+    if fraction == 0 && exponent > 1 {
+        // At a power of two, the float below is twice as near as the one above.
+        __big_shl(r, 1)
+        __big_shl(s, 1)
+        __big_shl(above, 1)
+    }
+
+    // The decimal exponent, estimated from the number of bits (log10(2) is
+    // 0.30103); the estimate is right or one too small.
+    var length = 0
+    var probe = f
+    while probe > 0 {
+        length += 1
+        probe = __shr(probe, 1)
+    }
+    var k = __rt_ceil(float(e + length - 1) * 0.30102999566398114 - 0.69)
+    if k >= 0 {
+        __big_pow10(s, k)
+    } else {
+        __big_pow10(r, -k)
+        __big_pow10(above, -k)
+        __big_pow10(below, -k)
+    }
+    __big_copy(t, r)
+    __big_add(t, above)
+    var c = __big_cmp(t, s)
+    if c > 0 || (c == 0 && even) {
+        k += 1
+    } else {
+        __big_mul(r, 10, 0)
+        __big_mul(above, 10, 0)
+        __big_mul(below, 10, 0)
+    }
+
+    var count = 0
+    while true {
+        // The next digit is r / s, which is below 10.
+        var digit = 0
+        while __big_cmp(r, s) >= 0 {
+            __big_sub(r, s)
+            digit += 1
+        }
+        // Can we stop here, rounding down or up, without leaving the range
+        // of numbers that read back as this float?
+        c = __big_cmp(r, below)
+        var down = c < 0 || (c == 0 && even)
+        __big_copy(t, r)
+        __big_add(t, above)
+        c = __big_cmp(t, s)
+        var up = c > 0 || (c == 0 && even)
+        if !down && !up {
+            __store8(out + count, 48 + digit)
+            count += 1
+            __big_mul(r, 10, 0)
+            __big_mul(above, 10, 0)
+            __big_mul(below, 10, 0)
+            continue
+        }
+        if down && up {
+            // Both would do: take the nearer, and the even digit when the
+            // number is exactly in the middle.
+            __big_copy(t, r)
+            __big_shl(t, 1)
+            c = __big_cmp(t, s)
+            if c > 0 || (c == 0 && digit % 2 == 1) {
+                digit += 1
+            }
+        } else if up {
+            digit += 1
+        }
+        __store8(out + count, 48 + digit)
+        count += 1
+        break
+    }
+    return (k + 1000) * 100 + count
+}
+
+// The text of a float: "2.0", "0.1", "-12.5", "1.5e-7", "1e+21", "NaN",
+// "Infinity". Digits are the shortest that read back as the same float; a
+// whole number keeps a ".0" so that it still looks like a float.
+fn __rt_float_str(x: float) -> string {
+    if x != x {
+        return "NaN"
+    }
+    var bits = __bits(x)
+    var magnitude = __and(bits, 9223372036854775807)
+    if magnitude == 9218868437227405312 {
+        if bits < 0 {
+            return "-Infinity"
+        }
+        return "Infinity"
+    }
+    if magnitude == 0 {
+        return "0.0"
+    }
+    // Whole numbers that fit in an int are the common case, and an easy one.
+    if magnitude < 4845873199050653696 {
+        var whole = int(x)
+        if float(whole) == x {
+            return __rt_int_str(whole) + ".0"
+        }
+    }
+    var digits = __rt_big(5)
+    var packed = __rt_float_digits(magnitude, digits)
+    var count = packed % 100
+    var n = packed / 100 - 1000
+    var out = __rt_new_str(32)
+    var w = out + 16
+    if bits < 0 {
+        __store8(w, 45)
+        w += 1
+    }
+    if n > 0 && n <= 21 {
+        // 12.5 or 1250000.0
+        var i = 0
+        while i < n {
+            var c = 48
+            if i < count {
+                c = __load8(digits + i)
+            }
+            __store8(w, c)
+            w += 1
+            i += 1
+        }
+        __store8(w, 46)
+        w += 1
+        if count <= n {
+            __store8(w, 48)
+            w += 1
+        }
+        while i < count {
+            __store8(w, __load8(digits + i))
+            w += 1
+            i += 1
+        }
+    } else if n > -6 && n <= 0 {
+        // 0.00125
+        __store8(w, 48)
+        __store8(w + 1, 46)
+        w += 2
+        var zeros = -n
+        while zeros > 0 {
+            __store8(w, 48)
+            w += 1
+            zeros -= 1
+        }
+        __copy(w, digits, count)
+        w += count
+    } else {
+        // 1.25e-7 or 1e+21
+        __store8(w, __load8(digits))
+        w += 1
+        if count > 1 {
+            __store8(w, 46)
+            __copy(w + 1, digits + 1, count - 1)
+            w += count
+        }
+        __store8(w, 101)
+        var power = n - 1
+        if power < 0 {
+            __store8(w + 1, 45)
+            power = -power
+        } else {
+            __store8(w + 1, 43)
+        }
+        w += 2
+        if power >= 100 {
+            __store8(w, 48 + power / 100)
+            w += 1
+        }
+        if power >= 10 {
+            __store8(w, 48 + power / 10 % 10)
+            w += 1
+        }
+        __store8(w, 48 + power % 10)
+        w += 1
+    }
+    __store32(out + 8, w - out - 16)
+    return __ptr_str(out)
+}
+
+// Reads a float: an optional sign, digits with an optional point, an
+// optional exponent ("12", "-0.5", ".5", "6.02e23"). The result is the float
+// nearest to the number that was written, whatever its number of digits.
+fn __rt_parse_float(s: string) -> float! {
+    var p = __str_ptr(s)
+    var n = __load32(p + 8)
+    var at = p + 16
+    var i = 0
+    while i < n {
+        var size = __rt_space_size(at + i, n - i)
+        if size == 0 {
+            break
+        }
+        i += size
+    }
+    var negative = false
+    if i < n && (__load8(at + i) == 45 || __load8(at + i) == 43) {
+        negative = __load8(at + i) == 45
+        i += 1
+    }
+
+    // The number is DIGITS * 10^power. The digits are gathered twice: the
+    // first 18 in an int, for the easy cases, and all of them (up to 770,
+    // more cannot change the result) in a big number, nine at a time.
+    var big = __rt_big(0)
+    __big_set(big, 0)
+    var chunk = 0
+    var chunk_digits = 0
+    var chunk_scale = 1
+    var small = 0
+    var count = 0           // digits kept, without the zeros in front
+    var seen = 0            // digits read, of any kind
+    var power = 0
+    var after_point = false
+    var lost = false        // a non-zero digit was left out
+    while i < n {
+        var c = __load8(at + i)
+        if c == 46 && !after_point {
+            after_point = true
+            i += 1
+            continue
+        }
+        if c < 48 || c > 57 {
+            break
+        }
+        seen += 1
+        i += 1
+        if count == 0 && c == 48 {
+            // A zero in front only moves the point.
+            if after_point {
+                power -= 1
+            }
+            continue
+        }
+        if count >= 770 {
+            if c != 48 {
+                lost = true
+            }
+            if !after_point {
+                power += 1
+            }
+            continue
+        }
+        if count < 18 {
+            small = small * 10 + (c - 48)
+        }
+        count += 1
+        if after_point {
+            power -= 1
+        }
+        chunk = chunk * 10 + (c - 48)
+        chunk_digits += 1
+        chunk_scale *= 10
+        if chunk_digits == 9 {
+            __big_mul(big, chunk_scale, chunk)
+            chunk = 0
+            chunk_digits = 0
+            chunk_scale = 1
+        }
+    }
+    var valid = seen > 0
+    if valid && i < n && (__load8(at + i) == 101 || __load8(at + i) == 69) {
+        i += 1
+        var minus = false
+        if i < n && (__load8(at + i) == 45 || __load8(at + i) == 43) {
+            minus = __load8(at + i) == 45
+            i += 1
+        }
+        var exponent = 0
+        var exponent_digits = 0
+        while i < n && __load8(at + i) >= 48 && __load8(at + i) <= 57 {
+            if exponent < 100000 {
+                exponent = exponent * 10 + (__load8(at + i) - 48)
+            }
+            exponent_digits += 1
+            i += 1
+        }
+        valid = exponent_digits > 0
+        if minus {
+            power -= exponent
+        } else {
+            power += exponent
+        }
+    }
+    while i < n {
+        var size = __rt_space_size(at + i, n - i)
+        if size == 0 {
+            break
+        }
+        i += size
+    }
+    if !valid || i < n {
+        fail "cannot convert " + __rt_quote(p) + " to float"
+    }
+
+    var sign = 0
+    if negative {
+        sign = -9223372036854775807 - 1
+    }
+    if count == 0 || count + power < -323 {
+        return __float(sign)                        // zero, or too small to be anything else
+    }
+    if count + power > 309 {
+        return __float(__or(sign, 9218868437227405312))     // infinity
+    }
+    if count <= 15 && power >= -22 && power <= 22 {
+        // The digits fit exactly in a float, and so does the power of ten:
+        // one multiplication or division gives the nearest float.
+        var scale = 1.0
+        var steps = power
+        if steps < 0 {
+            steps = -steps
+        }
+        while steps > 0 {
+            scale *= 10.0
+            steps -= 1
+        }
+        var value = float(small)
+        if power < 0 {
+            value /= scale
+        } else {
+            value *= scale
+        }
+        if negative {
+            return -value
+        }
+        return value
+    }
+
+    // The general case, exactly: the number is the fraction top / bottom.
+    if chunk_digits > 0 {
+        __big_mul(big, chunk_scale, chunk)
+    }
+    if lost {
+        // What was left out only matters as "a little more than this".
+        __big_mul(big, 10, 1)
+        power -= 1
+    }
+    var top = big
+    var bottom = __rt_big(1)
+    __big_set(bottom, 1)
+    if power >= 0 {
+        __big_pow10(top, power)
+    } else {
+        __big_pow10(bottom, -power)
+    }
+    // Scale by a power of two so that top / bottom has 55 or 56 bits: enough
+    // for the 53 of a float, plus what decides the rounding.
+    var shift = __big_bits(bottom) + 55 - __big_bits(top)
+    if shift >= 0 {
+        __big_shl(top, shift)
+    } else {
+        __big_shl(bottom, -shift)
+    }
+    __big_shl(bottom, 56)
+    var q = 0
+    var step = 0
+    while step < 57 {
+        q = q * 2
+        if __big_cmp(top, bottom) >= 0 {
+            __big_sub(top, bottom)
+            q += 1
+        }
+        __big_shl(top, 1)
+        step += 1
+    }
+    var inexact = __load64(top) > 0
+    // The number is (q + a fraction) * 2^-shift.
+    var length = 0
+    var probe = q
+    while probe > 0 {
+        length += 1
+        probe = __shr(probe, 1)
+    }
+    var highest = length - 1 - shift        // the exponent of its first bit
+    var keep = 53
+    if highest < -1022 {
+        keep = highest + 1075               // the smallest floats have fewer bits
+    }
+    if keep < 0 {
+        return __float(sign)
+    }
+    var drop = length - keep
+    var m = __shr(q, drop)
+    var rest = q - __shl(m, drop)
+    var half = __shl(1, drop - 1)
+    // Round to the nearest; exactly halfway goes to the even one.
+    if rest > half || (rest == half && (inexact || m % 2 == 1)) {
+        m += 1
+    }
+    if keep < 53 {
+        // m * 2^-1074: for these floats, the bits are simply m.
+        return __float(__or(sign, m))
+    }
+    var lowest = drop - shift
+    if m == 9007199254740992 {
+        m = 4503599627370496
+        lowest += 1
+    }
+    var exponent_bits = lowest + 1075
+    if exponent_bits >= 2047 {
+        return __float(__or(sign, 9218868437227405312))
+    }
+    return __float(__or(sign, __or(__shl(exponent_bits, 52), m - 4503599627370496)))
+}
+
+// ---- powers ----
+//
+// `pow` follows the method of fdlibm, the "Freely Distributable LIBM" of
+// Sun Microsystems (e_pow.c, 1993-2004): log2(x) is computed with extra
+// precision as n + a correction, it is multiplied by y, and 2 is raised to
+// the result. The numbers below are the coefficients of its polynomials.
+// The result is within one unit in the last place of the exact one.
+
+// The upper and lower 32 bits of a float (the upper ones as a signed number).
+fn __hi(x: float) -> int {
+    return __sar(__bits(x), 32)
+}
+
+fn __lo(x: float) -> int {
+    return __and(__bits(x), 4294967295)
+}
+
+fn __with_hi(x: float, hi: int) -> float {
+    return __float(__or(__shl(hi, 32), __and(__bits(x), 4294967295)))
+}
+
+// `x` with its lower 32 bits cleared.
+fn __no_lo(x: float) -> float {
+    return __float(__and(__bits(x), -4294967296))
+}
+
+// x * 2^n
+fn __rt_scalbn(x: float, n: int) -> float {
+    var hx = __hi(x)
+    var k = __sar(__and(hx, 2146435072), 20)
+    if k == 0 {
+        if __and(__bits(x), 9223372036854775807) == 0 {
+            return x
+        }
+        x *= 18014398509481984.0
+        hx = __hi(x)
+        k = __sar(__and(hx, 2146435072), 20) - 54
+        if n < -50000 {
+            return 1e-300 * x
+        }
+    }
+    if k == 2047 {
+        return x + x
+    }
+    k = k + n
+    var huge = 1e300
+    var tiny = 1e-300
+    if hx < 0 {
+        huge = -huge
+        tiny = -tiny
+    }
+    if k > 2046 {
+        return 1e300 * huge
+    }
+    if k > 0 {
+        return __with_hi(x, __or(__and(hx, 2148532223), __shl(k, 20)))
+    }
+    if k <= -54 {
+        if n > 50000 {
+            return 1e300 * huge
+        }
+        return 1e-300 * tiny
+    }
+    k += 54
+    x = __with_hi(x, __or(__and(hx, 2148532223), __shl(k, 20)))
+    return x * 5.55111512312578270212e-17
+}
+
+fn __rt_pow(x: float, y: float) -> float {
+    var hx = __hi(x)
+    var lx = __lo(x)
+    var hy = __hi(y)
+    var ly = __lo(y)
+    var ix = __and(hx, 2147483647)
+    var iy = __and(hy, 2147483647)
+
+    if iy == 0 && ly == 0 {
+        return 1.0                              // anything to the power 0
+    }
+    if ix > 2146435072 || (ix == 2146435072 && lx != 0) || iy > 2146435072 || (iy == 2146435072 && ly != 0) {
+        return x + y                            // not a number
+    }
+
+    // For a negative x: is y an odd whole number (1), an even one (2), or not whole (0)?
+    var whole = 0
+    if hx < 0 {
+        if iy >= 1128267776 {
+            whole = 2
+        } else if iy >= 1072693248 {
+            var bits = __sar(iy, 20) - 1023
+            if bits > 20 {
+                var j = __shr(ly, 52 - bits)
+                if __shl(j, 52 - bits) == ly {
+                    whole = 2 - __and(j, 1)
+                }
+            } else if ly == 0 {
+                var j = __sar(iy, 20 - bits)
+                if __shl(j, 20 - bits) == iy {
+                    whole = 2 - __and(j, 1)
+                }
+            }
+        }
+    }
+
+    if ly == 0 {
+        if iy == 2146435072 {
+            // y is infinite
+            if ix == 1072693248 && lx == 0 {
+                return y - y
+            }
+            if ix >= 1072693248 {
+                if hy >= 0 {
+                    return y
+                }
+                return 0.0
+            }
+            if hy < 0 {
+                return -y
+            }
+            return 0.0
+        }
+        if iy == 1072693248 {
+            if hy < 0 {
+                return 1.0 / x
+            }
+            return x
+        }
+        if hy == 1073741824 {
+            return x * x
+        }
+        if hy == 1071644672 && hx >= 0 {
+            return sqrt(x)
+        }
+    }
+
+    var ax = abs(x)
+    if lx == 0 && (ix == 2146435072 || ix == 0 || ix == 1072693248) {
+        // x is zero, infinite or 1 (with either sign)
+        var special = ax
+        if hy < 0 {
+            special = 1.0 / special
+        }
+        if hx < 0 {
+            if ix == 1072693248 && whole == 0 {
+                special = (special - special) / (special - special)
+            } else if whole == 1 {
+                special = -special
+            }
+        }
+        return special
+    }
+
+    if hx < 0 && whole == 0 {
+        return (x - x) / (x - x)                // a negative number to a power that is not whole
+    }
+    var sign = 1.0
+    if hx < 0 && whole == 1 {
+        sign = -1.0
+    }
+
+    // log2(|x|) = t1 + t2, where t1 holds the first bits and t2 the rest.
+    var t1 = 0.0
+    var t2 = 0.0
+    if iy > 1105199104 {
+        // |y| is huge: unless x is very close to 1, the result is 0 or infinite.
+        if iy > 1139802112 {
+            if ix <= 1072693247 {
+                if hy < 0 {
+                    return 1e300 * 1e300
+                }
+                return 1e-300 * 1e-300
+            }
+            if ix >= 1072693248 {
+                if hy > 0 {
+                    return 1e300 * 1e300
+                }
+                return 1e-300 * 1e-300
+            }
+        }
+        if ix < 1072693247 {
+            if hy < 0 {
+                return sign * 1e300 * 1e300
+            }
+            return sign * 1e-300 * 1e-300
+        }
+        if ix > 1072693248 {
+            if hy > 0 {
+                return sign * 1e300 * 1e300
+            }
+            return sign * 1e-300 * 1e-300
+        }
+        var d = ax - 1.0
+        var w = (d * d) * (0.5 - d * (0.3333333333333333333333 - d * 0.25))
+        var u = 1.44269502162933349609e+00 * d
+        var v = d * 1.92596299112661746302e-08 - w * 1.44269504088896338700e+00
+        t1 = __no_lo(u + v)
+        t2 = v - (t1 - u)
+    } else {
+        var n = 0
+        if ix < 1048576 {
+            ax *= 9007199254740992.0
+            n -= 53
+            ix = __hi(ax)
+        }
+        n += __sar(ix, 20) - 1023
+        var j = __and(ix, 1048575)
+        // Bring |x| between sqrt(3)/2 and sqrt(3), near 1 or near 1.5.
+        ix = __or(j, 1072693248)
+        var near = 1.0
+        var log_h = 0.0
+        var log_l = 0.0
+        var k = 0
+        if j <= 235662 {
+            k = 0
+        } else if j < 767610 {
+            k = 1
+            near = 1.5
+            log_h = 5.84962487220764160156e-01
+            log_l = 1.35003920212974897128e-08
+        } else {
+            n += 1
+            ix -= 1048576
+        }
+        ax = __with_hi(ax, ix)
+
+        var u = ax - near
+        var v = 1.0 / (ax + near)
+        var ss = u * v
+        var s_h = __no_lo(ss)
+        var t_h = __with_hi(0.0, __or(__sar(ix, 1), 536870912) + 524288 + __shl(k, 18))
+        var t_l = ax - (t_h - near)
+        var s_l = v * ((u - s_h * t_h) - s_h * t_l)
+        var s2 = ss * ss
+        var r = s2 * s2 * (5.99999999999994648725e-01 + s2 * (4.28571428578550184252e-01 + s2 * (3.33333329818377432918e-01 + s2 * (2.72728123808534006489e-01 + s2 * (2.30660745775561754067e-01 + s2 * 2.06975017800338417784e-01)))))
+        r += s_l * (s_h + ss)
+        s2 = s_h * s_h
+        t_h = __no_lo(3.0 + s2 + r)
+        t_l = r - ((t_h - 3.0) - s2)
+        u = s_h * t_h
+        v = s_l * t_h + t_l * ss
+        var p_h = __no_lo(u + v)
+        var p_l = v - (p_h - u)
+        var z_h = 9.61796700954437255859e-01 * p_h
+        var z_l = -7.02846165095275826516e-09 * p_h + p_l * 9.61796693925975554329e-01 + log_l
+        var t = float(n)
+        t1 = __no_lo(((z_h + z_l) + log_h) + t)
+        t2 = z_l - (((t1 - t) - log_h) - z_h)
+    }
+
+    // y * log2(|x|), again as a first part and a rest.
+    var y1 = __no_lo(y)
+    var e_l = (y - y1) * t1 + y * t2
+    var e_h = y1 * t1
+    var z = e_l + e_h
+    var j = __hi(z)
+    var i = __lo(z)
+    if j >= 1083179008 {
+        // 1024 or more: too big
+        if j != 1083179008 || i != 0 {
+            return sign * 1e300 * 1e300
+        }
+        if e_l + 8.0085662595372944372e-17 > z - e_h {
+            return sign * 1e300 * 1e300
+        }
+    } else if __and(j, 2147483647) >= 1083231232 {
+        // -1075 or less: too small
+        if j != -1064252416 || i != 0 {
+            return sign * 1e-300 * 1e-300
+        }
+        if e_l <= z - e_h {
+            return sign * 1e-300 * 1e-300
+        }
+    }
+
+    // 2^(e_h + e_l): the whole part n of the exponent is set aside.
+    i = __and(j, 2147483647)
+    var k = __sar(i, 20) - 1023
+    var n = 0
+    if i > 1071644672 {
+        n = j + __sar(1048576, k + 1)
+        k = __sar(__and(n, 2147483647), 20) - 1023
+        var t = __with_hi(0.0, __and(n, -1 - __sar(1048575, k)))
+        n = __sar(__or(__and(n, 1048575), 1048576), 20 - k)
+        if j < 0 {
+            n = -n
+        }
+        e_h -= t
+    }
+    var t = __no_lo(e_l + e_h)
+    var u = t * 6.93147182464599609375e-01
+    var v = (e_l - (t - e_h)) * 6.93147180559945286227e-01 + t * -1.90465429995776804525e-09
+    z = u + v
+    var w = v - (z - u)
+    t = z * z
+    t1 = z - t * (1.66666666666666019037e-01 + t * (-2.77777777770155933842e-03 + t * (6.61375632143793436117e-05 + t * (-1.65339022054652515390e-06 + t * 4.13813679705723846039e-08))))
+    var r = (z * t1) / (t1 - 2.0) - (w + z * w)
+    z = 1.0 - (r - z)
+    j = __hi(z) + __shl(n, 20)
+    if __sar(j, 20) <= 0 {
+        z = __rt_scalbn(z, n)                   // the result is one of the smallest floats
+    } else {
+        z = __with_hi(z, j)
+    }
+    return sign * z
+}
+
 // ---- generic operations, driven by type descriptors ----
 
 // The text form of a value. Strings nested in a list or a struct are quoted.
@@ -1091,6 +2113,9 @@ fn __rt_repr(v: int, td: int, quoted: bool) -> string {
     var kind = __load64(td)
     if kind == 0 {
         return __rt_int_str(v)
+    }
+    if kind == 2 {
+        return __rt_float_str(__float(v))
     }
     if kind == 1 {
         if v != 0 {
@@ -1167,6 +2192,10 @@ fn __rt_repr(v: int, td: int, quoted: bool) -> string {
 // Structural equality.
 fn __rt_eq(a: int, b: int, td: int) -> bool {
     var kind = __load64(td)
+    if kind == 2 {
+        // Not the same as equal bits: 0.0 equals -0.0, and NaN equals nothing.
+        return __float(a) == __float(b)
+    }
     if kind < 3 || a == b {
         return a == b
     }
@@ -1740,6 +2769,7 @@ fn __rt_list_sort(list: int) -> int {
         return out
     }
     var strings = __rt_list_holds_refs(list)
+    var floats = __load64(__load64(__load32(list + 4) + 8)) == 2
     var src = __load64(out + 24)
     var dst = __rt_alloc(n * 8)
     var width = 1
@@ -1764,6 +2794,8 @@ fn __rt_list_sort(list: int) -> int {
                 var take_left = x <= y
                 if strings {
                     take_left = __rt_bytes_cmp(x, y) <= 0
+                } else if floats {
+                    take_left = !(__float(y) < __float(x))
                 }
                 if take_left {
                     __store64(dst + k * 8, x)

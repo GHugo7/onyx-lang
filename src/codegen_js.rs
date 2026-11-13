@@ -194,6 +194,15 @@ impl<'a> Gen<'a> {
         self.line(&format!("class {} {{", js_name(&s.name)));
         self.indent += 1;
         self.line(&format!("static $name = {};", js_string(&s.name)));
+        // Which fields hold floats (see `float_shape`).
+        let floats: Vec<String> = self.an.structs[&s.name]
+            .fields
+            .iter()
+            .filter_map(|(field, ty)| float_shape(ty).map(|shape| format!("{}: {shape}", prop(field))))
+            .collect();
+        if !floats.is_empty() {
+            self.line(&format!("static $floats = {{ {} }};", floats.join(", ")));
+        }
         let params: Vec<String> = (0..s.fields.len()).map(|i| format!("${i}")).collect();
         self.line(&format!("constructor({}) {{", params.join(", ")));
         self.indent += 1;
@@ -466,7 +475,10 @@ impl<'a> Gen<'a> {
         match self.ty(e) {
             Type::Str => code,
             Type::Float => format!("$rt.fstr({code})"),
-            _ => format!("$rt.str({code})"),
+            ty => match float_shape(&ty) {
+                Some(shape) => format!("$rt.str({code}, {shape})"),
+                None => format!("$rt.str({code})"),
+            },
         }
     }
 
@@ -661,7 +673,12 @@ impl<'a> Gen<'a> {
             CallKind::BuiltinMethod(recv, name) => {
                 let ExprKind::Field { obj, .. } = &callee.kind else { return String::new() };
                 let o = self.expr(obj);
-                let a = self.exprs(args);
+                let mut a = self.exprs(args);
+                if let (Recv::List, "join", Type::List(elem)) = (recv, name.as_str(), self.ty(obj)) {
+                    if let Some(shape) = float_shape(&elem) {
+                        a = format!("{a}, {shape}");
+                    }
+                }
                 self.builtin_method(recv, &name, &o, &a)
             }
         }
@@ -744,5 +761,19 @@ impl<'a> Gen<'a> {
             (Recv::Chan, "close") => format!("{o}.close()"),
             _ => format!("$rt.panic(\"unknown method {name}\")"),
         }
+    }
+}
+
+/// In JavaScript an int and a float are the same kind of number, so a value
+/// alone does not tell whether `2` should be shown as `2` or `2.0`. Where
+/// the type says that floats are involved, the runtime is told where they
+/// are: `1` for a float, `[shape]` for a list of them, `{v: shape}` for the
+/// values of a map. Structs carry this information themselves (`$floats`).
+fn float_shape(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Float => Some("1".to_string()),
+        Type::List(elem) => float_shape(elem).map(|shape| format!("[{shape}]")),
+        Type::Map(_, value) => float_shape(value).map(|shape| format!("{{v: {shape}}}")),
+        _ => None,
     }
 }

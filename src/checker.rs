@@ -125,6 +125,8 @@ pub struct Analysis {
     pub catch_values: HashSet<usize>,
     /// Calls that can fail.
     pub fallible_calls: HashSet<usize>,
+    /// Expressions of type `int` whose value is used as a `float`.
+    pub widened: HashSet<usize>,
 }
 
 pub fn fn_key(name: &str) -> String {
@@ -167,7 +169,9 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "__load8" | "__load32" | "__load64" => (vec![Int], Int, false, false),
         "__store8" | "__store32" | "__store64" => (vec![Int, Int], Void, false, false),
         "__copy" => (vec![Int, Int, Int], Void, false, false),
-        "__and" => (vec![Int, Int], Int, false, false),
+        "__and" | "__or" | "__xor" | "__shl" | "__shr" | "__sar" => (vec![Int, Int], Int, false, false),
+        "__bits" => (vec![Float], Int, false, false),
+        "__float" => (vec![Int], Float, false, false),
         "__state" => (vec![], Int, false, false),
         "__str_ptr" => (vec![Str], Int, false, false),
         "__ptr_str" => (vec![Int], Str, false, false),
@@ -672,9 +676,18 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn require(&mut self, found: &Type, expected: &Type, span: Span) {
+    fn require(&mut self, found: &Type, expected: &Type, e: &Expr) {
         if !self.assignable(found, expected) {
-            self.mismatch(expected, found, span);
+            self.mismatch(expected, found, e.span);
+        }
+        self.widen(found, expected, e);
+    }
+
+    /// Notes that the int `e` is used where a float is expected: targets
+    /// that store the two differently have to convert it there.
+    fn widen(&mut self, found: &Type, expected: &Type, e: &Expr) {
+        if *found == Type::Int && *expected == Type::Float {
+            self.an.widened.insert(e.id);
         }
     }
 
@@ -800,7 +813,7 @@ impl<'a> Checker<'a> {
                 let found = self.stmt_expr(init, annotated.as_ref(), true);
                 let var_ty = match annotated {
                     Some(a) => {
-                        self.require(&found, &a, init.span);
+                        self.require(&found, &a, init);
                         a
                     }
                     None => found,
@@ -818,8 +831,8 @@ impl<'a> Checker<'a> {
                 let target_ty = self.assign_target(target);
                 let found = self.stmt_expr(value, Some(&target_ty), true);
                 match op {
-                    AssignOp::Set => self.require(&found, &target_ty, value.span),
-                    AssignOp::Add if target_ty == Type::Str => self.require(&found, &Type::Str, value.span),
+                    AssignOp::Set => self.require(&found, &target_ty, value),
+                    AssignOp::Add if target_ty == Type::Str => self.require(&found, &Type::Str, value),
                     _ => {
                         if !target_ty.is_numeric() && !target_ty.is_unknown() {
                             self.err(Diagnostic::new(
@@ -828,7 +841,7 @@ impl<'a> Checker<'a> {
                                 target.span,
                             ));
                         } else {
-                            self.require(&found, &target_ty, value.span);
+                            self.require(&found, &target_ty, value);
                         }
                     }
                 }
@@ -838,7 +851,7 @@ impl<'a> Checker<'a> {
             }
             StmtKind::If { cond, then, els } => {
                 let t = self.expr(cond, Some(&Type::Bool));
-                self.require(&t, &Type::Bool, cond.span);
+                self.require(&t, &Type::Bool, cond);
                 self.block(then);
                 if let Some(els) = els {
                     self.stmt(els);
@@ -846,7 +859,7 @@ impl<'a> Checker<'a> {
             }
             StmtKind::While { cond, body } => {
                 let t = self.expr(cond, Some(&Type::Bool));
-                self.require(&t, &Type::Bool, cond.span);
+                self.require(&t, &Type::Bool, cond);
                 self.cur().loop_depth += 1;
                 self.block(body);
                 self.cur().loop_depth -= 1;
@@ -892,7 +905,7 @@ impl<'a> Checker<'a> {
                                     .help(format!("add a return type: `-> {found}`")));
                             }
                         } else {
-                            self.require(&found, &ret, v.span);
+                            self.require(&found, &ret, v);
                         }
                     }
                     None => {
@@ -935,7 +948,7 @@ impl<'a> Checker<'a> {
                 match chan_ty {
                     Type::Chan(elem) => {
                         let found = self.expr(value, Some(&elem));
-                        self.require(&found, &elem, value.span);
+                        self.require(&found, &elem, value);
                     }
                     Type::Unknown => {
                         self.expr(value, None);
@@ -1102,7 +1115,7 @@ impl<'a> Checker<'a> {
                     match info.fields.iter().find(|(n, _)| n == &f.name) {
                         Some((_, fty)) => {
                             let found = self.expr(&f.value, Some(fty));
-                            self.require(&found, fty, f.value.span);
+                            self.require(&found, fty, &f.value);
                             if !seen.insert(&f.name) {
                                 self.err(Diagnostic::new("E0112", format!("field `{}` is set twice", f.name), f.name_span));
                             }
@@ -1197,17 +1210,17 @@ impl<'a> Checker<'a> {
                 match obj_ty {
                     Type::List(elem) => {
                         let it = self.expr(index, Some(&Type::Int));
-                        self.require(&it, &Type::Int, index.span);
+                        self.require(&it, &Type::Int, index);
                         *elem
                     }
                     Type::Str => {
                         let it = self.expr(index, Some(&Type::Int));
-                        self.require(&it, &Type::Int, index.span);
+                        self.require(&it, &Type::Int, index);
                         Type::Str
                     }
                     Type::Map(k, v) => {
                         let it = self.expr(index, Some(&k));
-                        self.require(&it, &k, index.span);
+                        self.require(&it, &k, index);
                         *v
                     }
                     Type::Unknown => {
@@ -1271,7 +1284,7 @@ impl<'a> Checker<'a> {
                     return Type::Void;
                 }
                 let d = self.expr(default, Some(&ty));
-                self.require(&d, &ty, default.span);
+                self.require(&d, &ty, default);
                 ty
             }
             ExprKind::Catch { expr, name, name_span, body } => {
@@ -1303,6 +1316,9 @@ impl<'a> Checker<'a> {
                     };
                     match last_ty {
                         Some(t) if t != Type::Void && self.assignable(&t, &ty) => {
+                            if let (Type::Int, Type::Float, Some(Stmt { kind: StmtKind::Expr(last), .. })) = (&t, &ty, body.stmts.last()) {
+                                self.an.widened.insert(last.id);
+                            }
                             self.an.catch_values.insert(e.id);
                         }
                         Some(t) if t != Type::Void => {
@@ -1335,14 +1351,14 @@ impl<'a> Checker<'a> {
                 let elem = self.resolve(elem);
                 if let Some(cap) = cap {
                     let t = self.expr(cap, Some(&Type::Int));
-                    self.require(&t, &Type::Int, cap.span);
+                    self.require(&t, &Type::Int, cap);
                 }
                 Type::Chan(Box::new(elem))
             }
             ExprKind::Range { lo, hi } => {
                 for bound in [lo, hi] {
                     let t = self.expr(bound, Some(&Type::Int));
-                    self.require(&t, &Type::Int, bound.span);
+                    self.require(&t, &Type::Int, bound);
                 }
                 Type::Range
             }
@@ -1363,7 +1379,8 @@ impl<'a> Checker<'a> {
     /// Checks list items / map keys / map values and returns their common type.
     fn unify_items<'e>(&mut self, items: impl Iterator<Item = &'e Expr>, want: Option<Type>) -> Type {
         let mut elem = want.clone();
-        for item in items {
+        let items: Vec<&Expr> = items.collect();
+        for &item in &items {
             let found = self.expr(item, elem.as_ref());
             match &elem {
                 None => elem = Some(found),
@@ -1381,6 +1398,15 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+        if elem == Some(Type::Float) {
+            // The ints among them become floats, also those seen before the
+            // first float.
+            for item in items {
+                if self.an.types.get(&item.id) == Some(&Type::Int) {
+                    self.an.widened.insert(item.id);
+                }
+            }
+        }
         elem.unwrap_or(Type::Unknown)
     }
 
@@ -1394,6 +1420,11 @@ impl<'a> Checker<'a> {
             };
         }
         let numeric = l.is_numeric() && r.is_numeric();
+        if numeric && !matches!(op, BinOp::And | BinOp::Or) {
+            // In `2 * x` with a float `x`, the 2 is a float too.
+            self.widen(&l, &r, lhs);
+            self.widen(&r, &l, rhs);
+        }
         let result = match op {
             BinOp::Add if l == Type::Str && r == Type::Str => Some(Type::Str),
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod if numeric => {
@@ -1448,7 +1479,7 @@ impl<'a> Checker<'a> {
             match params.get(i) {
                 Some(p) => {
                     let found = self.expr(arg, Some(p));
-                    self.require(&found, p, arg.span);
+                    self.require(&found, p, arg);
                 }
                 None => {
                     self.expr(arg, None);
@@ -1645,6 +1676,10 @@ impl<'a> Checker<'a> {
                     numeric(self, 0);
                     numeric(self, 1);
                     let both_int = arg_types[0] == Type::Int && arg_types[1] == Type::Int;
+                    if !both_int {
+                        self.widen(&arg_types[0], &Type::Float, &args[0]);
+                        self.widen(&arg_types[1], &Type::Float, &args[1]);
+                    }
                     return (if both_int { Type::Int } else { Type::Float }, false);
                 }
                 (Type::Unknown, false)

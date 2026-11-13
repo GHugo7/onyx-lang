@@ -29,7 +29,7 @@ given a value when it is declared; there is no `null`.
 | Type | Examples | Notes |
 | --- | --- | --- |
 | `int` | `42`, `-7`, `1_000_000` | whole numbers |
-| `float` | `3.14`, `2.0` | decimal numbers |
+| `float` | `3.14`, `2.0`, `1.5e-7` | decimal numbers |
 | `bool` | `true`, `false` | |
 | `string` | `"hello"` | text, double quotes only |
 

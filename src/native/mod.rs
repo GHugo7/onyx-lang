@@ -34,6 +34,7 @@ mod asm;
 mod elf;
 mod lower;
 mod plan;
+mod widen;
 
 use crate::ast::*;
 use crate::checker::{method_key, Analysis, CallKind, Recv, Type};
@@ -68,6 +69,7 @@ const VARIABLE_REGS: [Reg; 6] = [RBX, R12, R13, R14, RSI, RDI];
 const SELF: u8 = 3;
 
 pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> Result<Vec<u8>, Vec<Diagnostic>> {
+    widen::widen(program, an);
     lower::lower(program, an);
     let (program, an) = (&*program, &*an);
     let mut g = Gen {
@@ -209,10 +211,10 @@ fn is_ref(ty: &Type) -> bool {
 
 fn supported(ty: &Type) -> bool {
     match ty {
-        Type::Int | Type::Bool | Type::Str | Type::Error | Type::Void | Type::Range | Type::Unknown => true,
+        Type::Int | Type::Float | Type::Bool | Type::Str | Type::Error | Type::Void | Type::Range | Type::Unknown => true,
         Type::Struct(_) | Type::Interface(_) => true,
         Type::List(elem) => supported(elem),
-        Type::Map(key, value) => supported(key) && supported(value),
+        Type::Map(key, value) => **key != Type::Float && supported(key) && supported(value),
         _ => false,
     }
 }
@@ -538,6 +540,7 @@ impl<'a> Gen<'a> {
                 other => {
                     let kind = match other {
                         Type::Bool => 1,
+                        Type::Float => 2,
                         Type::Str => 3,
                         Type::Interface(_) => 6,
                         _ => 0,
@@ -1297,6 +1300,24 @@ impl<'a> Gen<'a> {
                 let cc = self.compare(*op, lhs, rhs);
                 self.asm.jcc(if when { cc } else { cc.negate() }, target);
             }
+            ExprKind::Binary { op: op @ (BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge), lhs, rhs }
+                if self.ty(lhs) == Type::Float =>
+            {
+                match (self.float_compare(*op, lhs, rhs), when) {
+                    // "Equal" needs both to be numbers; "different" is everything else.
+                    (Cc::E, true) | (Cc::Ne, false) => {
+                        let unordered = self.asm.jcc_short(Cc::P);
+                        self.asm.jcc(Cc::E, target);
+                        self.asm.bind_short(unordered);
+                    }
+                    (Cc::E, false) | (Cc::Ne, true) => {
+                        self.asm.jcc(Cc::Ne, target);
+                        self.asm.jcc(Cc::P, target);
+                    }
+                    (cc, true) => self.asm.jcc(cc, target),
+                    (cc, false) => self.asm.jcc(cc.negate(), target),
+                }
+            }
             _ => {
                 match self.simple(cond) {
                     Some(Operand::At(Loc::Reg(r))) => self.asm.test(r, r),
@@ -1656,6 +1677,7 @@ impl<'a> Gen<'a> {
         }
         match &e.kind {
             ExprKind::Int(n) => self.asm.mov_imm(RAX, *n),
+            ExprKind::Float(x) => self.asm.mov_imm(RAX, x.to_bits() as i64),
             ExprKind::Bool(b) => self.asm.mov_imm(RAX, *b as i64),
             ExprKind::Str(parts) => {
                 let pieces: Vec<Piece> = parts
@@ -1728,6 +1750,12 @@ impl<'a> Gen<'a> {
                 }
                 self.asm.pop(RAX);
             }
+            ExprKind::Unary { op: UnOp::Neg, expr } if ty == Type::Float => {
+                // Only the sign bit changes.
+                self.expr(expr);
+                self.asm.mov_imm(RCX, i64::MIN);
+                self.asm.alu(Alu::Xor, RAX, RCX);
+            }
             ExprKind::Unary { op, expr } => {
                 self.expr(expr);
                 match op {
@@ -1750,6 +1778,25 @@ impl<'a> Gen<'a> {
                         self.asm.bind(end);
                     }
                     _ if operand_ty == Type::Str => self.string_binary(*op, lhs, rhs),
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod if operand_ty == Type::Float => {
+                        self.float(e);
+                        self.asm.movq_out(RAX, XMM0);
+                    }
+                    _ if operand_ty == Type::Float => {
+                        let cc = self.float_compare(*op, lhs, rhs);
+                        match cc {
+                            Cc::E | Cc::Ne => {
+                                // Equal only if both are numbers, too.
+                                let unordered = self.asm.jcc_short(Cc::P);
+                                self.asm.setcc(cc);
+                                let done = self.asm.jmp_short();
+                                self.asm.bind_short(unordered);
+                                self.asm.mov_imm(RAX, (cc == Cc::Ne) as i64);
+                                self.asm.bind_short(done);
+                            }
+                            _ => self.asm.setcc(cc),
+                        }
+                    }
                     _ if is_ref(&operand_ty) => {
                         // Lists and structs are compared by content.
                         self.call_rt("__rt_eq", &[Arg::Borrow(lhs), Arg::Borrow(rhs), Arg::Descriptor(operand_ty)], true);
@@ -1866,7 +1913,6 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Lambda { .. } => self.unsupported(e.span, "lambdas"),
             ExprKind::Recv(_) | ExprKind::ChanNew { .. } => self.unsupported(e.span, "channels"),
-            ExprKind::Float(_) => self.unsupported(e.span, "floats"),
         }
     }
 
@@ -1956,7 +2002,7 @@ impl<'a> Gen<'a> {
     /// runtime helpers. Nothing a pure expression does can release an object.
     fn is_pure(&self, e: &Expr) -> bool {
         match &e.kind {
-            ExprKind::Int(_) | ExprKind::Bool(_) => true,
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => true,
             ExprKind::Str(parts) => parts.iter().all(|p| match p {
                 StrPart::Lit(_) => true,
                 StrPart::Expr(inner) => self.is_pure(inner),
@@ -1974,7 +2020,10 @@ impl<'a> Gen<'a> {
                     _ => true,
                 };
                 let harmless = match self.call_kind(e) {
-                    Some(CallKind::Builtin(name)) => matches!(name.as_str(), "str" | "abs" | "min" | "max"),
+                    Some(CallKind::Builtin(name)) => matches!(
+                        name.as_str(),
+                        "str" | "abs" | "min" | "max" | "float" | "int" | "sqrt" | "pow" | "floor" | "ceil" | "round"
+                    ),
                     // Strings never change: all their methods only read them.
                     Some(CallKind::BuiltinMethod(Recv::Str, _)) => true,
                     Some(CallKind::BuiltinMethod(_, name)) => matches!(name.as_str(), "len" | "contains" | "index_of"),
@@ -2017,6 +2066,11 @@ impl<'a> Gen<'a> {
             Type::Int => {
                 self.push_value(e);
                 self.call_runtime("__rt_int_str", 1);
+                true
+            }
+            Type::Float => {
+                self.push_value(e);
+                self.call_runtime("__rt_float_str", 1);
                 true
             }
             Type::Bool => {
@@ -2603,6 +2657,158 @@ impl<'a> Gen<'a> {
         self.scopes.pop();
     }
 
+    // ---- floats ----
+    //
+    // A float is stored like everything else, in 8 bytes: variables, fields,
+    // list elements and RAX hold its bits. Computing happens in XMM0 and
+    // XMM1; a whole expression such as `a * b + c * d` stays there, and only
+    // its result goes back to RAX.
+
+    /// Loads the float stored at `loc`.
+    fn float_load(&mut self, dst: Xmm, loc: Loc) {
+        match loc {
+            Loc::Reg(r) => self.asm.movq_in(dst, r),
+            Loc::Frame(offset) => self.asm.sse_load(Sse::Mov, dst, RBP, offset),
+            Loc::Global(offset) => self.asm.sse_load(Sse::Mov, dst, R15, offset),
+        }
+    }
+
+    /// Evaluates the float `e` into XMM0.
+    fn float(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Float(x) => {
+                self.asm.mov_imm(RAX, x.to_bits() as i64);
+                self.asm.movq_in(XMM0, RAX);
+            }
+            ExprKind::Binary { op: BinOp::Mod, lhs, rhs } if self.ty(e) == Type::Float => {
+                // The remainder comes from the processor's older floating-point
+                // unit, whose `fprem` is exact; it works on memory operands.
+                self.float(lhs);
+                self.asm.movq_out(RAX, XMM0);
+                self.asm.push(RAX);
+                self.float(rhs);
+                self.asm.movq_out(RAX, XMM0);
+                self.asm.push(RAX);
+                self.asm.bytes(&[0xDD, 0x04, 0x24]); // fld qword [rsp]      the divisor
+                self.asm.bytes(&[0xDD, 0x44, 0x24, 0x08]); // fld qword [rsp+8]  the dividend
+                self.asm.bytes(&[0xD9, 0xF8]); // fprem: a partial remainder...
+                self.asm.bytes(&[0xDF, 0xE0]); // fnstsw ax
+                self.asm.bytes(&[0xF6, 0xC4, 0x04]); // test ah, 4
+                self.asm.bytes(&[0x75, 0xF7]); // jnz fprem: ...until it is complete
+                self.asm.bytes(&[0xDD, 0x5C, 0x24, 0x08]); // fstp qword [rsp+8]
+                self.asm.bytes(&[0xDD, 0xD8]); // fstp st(0)
+                self.asm.pop(RAX);
+                self.asm.pop(RAX);
+                self.asm.movq_in(XMM0, RAX);
+            }
+            ExprKind::Binary { op: op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div), lhs, rhs }
+                if self.ty(e) == Type::Float =>
+            {
+                let op = match op {
+                    BinOp::Add => Sse::Add,
+                    BinOp::Sub => Sse::Sub,
+                    BinOp::Mul => Sse::Mul,
+                    _ => Sse::Div,
+                };
+                // When the left side is a plain read and the right side a
+                // computation that runs no code of the program, the right
+                // side goes first: nothing has to wait on the stack.
+                let leaf = matches!(lhs.kind, ExprKind::Ident(_) | ExprKind::Float(_) | ExprKind::Field { .. } | ExprKind::Index { .. });
+                if leaf && self.simple(rhs).is_none() && !matches!(rhs.kind, ExprKind::Float(_)) && self.is_pure(lhs) && self.is_pure(rhs) {
+                    self.float(rhs);
+                    self.asm.sse(Sse::Mov, XMM1, XMM0);
+                    self.float(lhs);
+                    self.asm.sse(op, XMM0, XMM1);
+                    return;
+                }
+                self.float(lhs);
+                match (self.simple(rhs), &rhs.kind) {
+                    (Some(Operand::At(Loc::Reg(r))), _) => {
+                        self.asm.movq_in(XMM1, r);
+                        self.asm.sse(op, XMM0, XMM1);
+                    }
+                    (Some(Operand::At(Loc::Frame(offset))), _) => self.asm.sse_load(op, XMM0, RBP, offset),
+                    (Some(Operand::At(Loc::Global(offset))), _) => self.asm.sse_load(op, XMM0, R15, offset),
+                    (_, ExprKind::Float(x)) => {
+                        self.asm.mov_imm(RAX, x.to_bits() as i64);
+                        self.asm.movq_in(XMM1, RAX);
+                        self.asm.sse(op, XMM0, XMM1);
+                    }
+                    _ => {
+                        self.float_second(rhs);
+                        self.asm.sse(op, XMM0, XMM1);
+                    }
+                }
+            }
+            ExprKind::Call { args, .. } => match self.call_kind(e) {
+                Some(CallKind::Builtin(name)) if name == "float" && self.ty(&args[0]) == Type::Int => {
+                    self.expr(&args[0]);
+                    // Clearing the register first tells the processor that
+                    // its old content does not matter.
+                    self.asm.pxor(XMM0, XMM0);
+                    self.asm.cvtsi2sd(XMM0, RAX);
+                }
+                Some(CallKind::Builtin(name)) if name == "float" => self.float(&args[0]),
+                Some(CallKind::Builtin(name)) if name == "sqrt" => {
+                    self.float(&args[0]);
+                    self.asm.sse(Sse::Sqrt, XMM0, XMM0);
+                }
+                _ => {
+                    self.expr(e);
+                    self.asm.movq_in(XMM0, RAX);
+                }
+            },
+            _ => match self.simple(e) {
+                Some(Operand::At(loc)) => self.float_load(XMM0, loc),
+                _ => {
+                    self.expr(e);
+                    self.asm.movq_in(XMM0, RAX);
+                }
+            },
+        }
+    }
+
+    /// With a first operand in XMM0: evaluates `e` into XMM1, keeping XMM0.
+    fn float_second(&mut self, e: &Expr) {
+        match (self.simple(e), &e.kind) {
+            (Some(Operand::At(loc)), _) => self.float_load(XMM1, loc),
+            (_, ExprKind::Float(x)) => {
+                self.asm.mov_imm(RAX, x.to_bits() as i64);
+                self.asm.movq_in(XMM1, RAX);
+            }
+            _ => {
+                // Computing it uses XMM0, and may call functions: the first
+                // operand waits on the stack.
+                self.asm.movq_out(RAX, XMM0);
+                self.asm.push(RAX);
+                self.float(e);
+                self.asm.sse(Sse::Mov, XMM1, XMM0);
+                self.asm.pop(RAX);
+                self.asm.movq_in(XMM0, RAX);
+            }
+        }
+    }
+
+    /// Compares two floats and returns the condition under which
+    /// `lhs op rhs` holds. For `E` and `Ne` the caller must also look at the
+    /// parity flag, set when one of them is not a number; the other
+    /// conditions are false by themselves in that case.
+    fn float_compare(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr) -> Cc {
+        self.float(lhs);
+        self.float_second(rhs);
+        match op {
+            // `a < b` is "b is above a".
+            BinOp::Lt | BinOp::Le => self.asm.ucomisd(XMM1, XMM0),
+            _ => self.asm.ucomisd(XMM0, XMM1),
+        }
+        match op {
+            BinOp::Lt | BinOp::Gt => Cc::A,
+            BinOp::Le | BinOp::Ge => Cc::Ae,
+            BinOp::Eq => Cc::E,
+            _ => Cc::Ne,
+        }
+    }
+
     fn string_method(&mut self, e: &Expr, obj: &Expr, name: &str, args: &[Expr]) {
         let text = Arg::Borrow(obj);
         let strings = Arg::Descriptor(Type::List(Box::new(Type::Str)));
@@ -2799,6 +3005,36 @@ impl<'a> Gen<'a> {
             "parse_int" => self.call_rt_fallible("__rt_parse_int", &[Arg::Borrow(&args[0])], true),
             "exit" => self.call_rt("__rt_exit", &[Arg::Value(&args[0])], false),
             "panic" => self.call_rt("__rt_panic", &[Arg::Borrow(&args[0])], false),
+            "float" => {
+                self.float(e);
+                self.asm.movq_out(RAX, XMM0);
+            }
+            "int" if self.ty(&args[0]) == Type::Float => {
+                self.float(&args[0]);
+                self.asm.cvttsd2si(RAX, XMM0);
+            }
+            "int" => self.expr(&args[0]),
+            "sqrt" => {
+                self.float(e);
+                self.asm.movq_out(RAX, XMM0);
+            }
+            "pow" => self.call_rt("__rt_pow", &[Arg::Value(&args[0]), Arg::Value(&args[1])], true),
+            "floor" => self.call_rt("__rt_floor", &[Arg::Value(&args[0])], true),
+            "ceil" => self.call_rt("__rt_ceil", &[Arg::Value(&args[0])], true),
+            "round" => self.call_rt("__rt_round_float", &[Arg::Value(&args[0])], true),
+            "parse_float" => self.call_rt_fallible("__rt_parse_float", &[Arg::Borrow(&args[0])], true),
+            "random" => self.call_rt("__rt_random", &[], true),
+            "random_int" => self.call_rt("__rt_random_int", &[Arg::Value(&args[0]), Arg::Value(&args[1])], true),
+            "abs" if self.ty(e) == Type::Float => {
+                // Clear the sign bit.
+                self.expr(&args[0]);
+                self.asm.shift(Shift::Left, RAX, 1);
+                self.asm.shift(Shift::Right, RAX, 1);
+            }
+            "min" | "max" if self.ty(e) == Type::Float => {
+                let function = if name == "min" { "__rt_float_min" } else { "__rt_float_max" };
+                self.call_rt(function, &[Arg::Value(&args[0]), Arg::Value(&args[1])], true);
+            }
             "abs" => {
                 self.expr(&args[0]);
                 self.asm.alu_imm(Alu::Cmp, RAX, 0);
@@ -2921,6 +3157,37 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
+            "__or" | "__xor" => {
+                let alu = if name == "__or" { Alu::Or } else { Alu::Xor };
+                self.expr(&args[0]);
+                self.asm.push(RAX);
+                self.expr(&args[1]);
+                self.asm.pop(RCX);
+                self.asm.alu(alu, RAX, RCX);
+            }
+            "__shl" | "__shr" | "__sar" => {
+                let kind = match name {
+                    "__shl" => Shift::Left,
+                    "__shr" => Shift::Right,
+                    _ => Shift::RightSigned,
+                };
+                match &args[1].kind {
+                    ExprKind::Int(count) => {
+                        self.expr(&args[0]);
+                        self.asm.shift(kind, RAX, *count as u8);
+                    }
+                    _ => {
+                        self.expr(&args[0]);
+                        self.asm.push(RAX);
+                        self.expr(&args[1]);
+                        self.asm.mov(RCX, RAX);
+                        self.asm.pop(RAX);
+                        self.asm.shift_cl(kind, RAX);
+                    }
+                }
+            }
+            // A float and its bits are the same 64 bits: only the type changes.
+            "__bits" | "__float" => self.expr(&args[0]),
             "__state" => self.asm.mov(RAX, R15),
             "__td_string" => {
                 let td = self.descriptor(&Type::Str);

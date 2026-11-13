@@ -333,6 +333,20 @@ fn lex_number(src: &str, i: &mut usize, end: usize) -> Result<Tok, Diagnostic> {
             *i += 1;
         }
     }
+    // An exponent: `1e9`, `6.02e23`, `1.5e-7`.
+    if *i < end && (bytes[*i] == b'e' || bytes[*i] == b'E') {
+        let mut j = *i + 1;
+        if j < end && (bytes[j] == b'+' || bytes[j] == b'-') {
+            j += 1;
+        }
+        if j < end && bytes[j].is_ascii_digit() {
+            is_float = true;
+            while j < end && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            *i = j;
+        }
+    }
     let text: String = src[start..*i].chars().filter(|c| *c != '_').collect();
     let span = Span::new(start, *i);
     if is_float {

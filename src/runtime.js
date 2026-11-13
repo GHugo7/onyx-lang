@@ -27,20 +27,28 @@ const $rt = (() => {
   };
 
   // ---- formatting ----
-  const repr = (v) => {
+  // `shape` says where the floats are, since a JavaScript number does not:
+  // 1 for a float, [shape] for the elements of a list, {v: shape} for the
+  // values of a map. Structs know it for their own fields ($floats).
+  const repr = (v, shape) => {
     if (typeof v === "string") return JSON.stringify(v);
-    if (typeof v === "number" || typeof v === "boolean") return String(v);
-    if (Array.isArray(v)) return "[" + v.map(repr).join(", ") + "]";
-    if (v instanceof Map) return "{" + Array.from(v, ([k, x]) => repr(k) + ": " + repr(x)).join(", ") + "}";
+    if (typeof v === "number") return shape === 1 ? fstr(v) : String(v);
+    if (typeof v === "boolean") return String(v);
+    if (Array.isArray(v)) return "[" + v.map((x) => repr(x, shape && shape[0])).join(", ") + "]";
+    if (v instanceof Map) {
+      return "{" + Array.from(v, ([k, x]) => repr(k) + ": " + repr(x, shape && shape.v)).join(", ") + "}";
+    }
     if (v instanceof OnyxError) return v.message;
     if (v instanceof Chan) return "chan";
     if (typeof v === "function") return "fn";
     if (v === undefined) return "void";
-    const fields = Object.keys(v).map((k) => k + ": " + repr(v[k]));
+    const floats = v.constructor.$floats;
+    const fields = Object.keys(v).map((k) => k + ": " + repr(v[k], floats && floats[k]));
     return (v.constructor.$name || v.constructor.name) + "{" + fields.join(", ") + "}";
   };
-  const str = (v) => (typeof v === "string" ? v : repr(v));
-  const fstr = (x) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
+  const str = (v, shape) => (typeof v === "string" ? v : repr(v, shape));
+  // A whole float keeps a ".0" (unless it is so big that it shows an exponent).
+  const fstr = (x) => (Number.isInteger(x) && Math.abs(x) < 1e21 ? String(x) + ".0" : String(x));
 
   let write = (line) => console.log(line);
   const print = (...parts) => write(parts.join(" "));
@@ -303,7 +311,7 @@ const $rt = (() => {
     last: (l) => nonEmpty(l)[l.length - 1],
     contains: (l, v) => l.some((x) => eq(x, v)),
     indexOf: (l, v) => l.findIndex((x) => eq(x, v)),
-    join: (l, sep) => l.map(str).join(sep),
+    join: (l, sep, shape) => l.map((x) => str(x, shape)).join(sep),
     insert: (l, i, v) => {
       if (i < 0 || i > l.length) panic("index out of bounds: index " + i + ", length " + l.length);
       l.splice(i, 0, v);

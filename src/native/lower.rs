@@ -281,7 +281,28 @@ impl<'a> Lower<'a> {
             StmtKind::Assign { target, op, value } => {
                 let leaves = contains_try(target) || contains_try(value) || matches!(value.kind, ExprKind::Catch { .. });
                 let direct = matches!(target.kind, ExprKind::Ident(_)) && *op == AssignOp::Set;
-                if !leaves || direct {
+                if !leaves && *op != AssignOp::Set && self.ty(target) == Type::Float {
+                    // The code generator updates integers in place; a float
+                    // is computed and then stored: `x += v` becomes `x = x + v`.
+                    match &mut target.kind {
+                        ExprKind::Field { obj, .. } => self.settle(obj, out),
+                        ExprKind::Index { obj, index } => {
+                            self.settle(obj, out);
+                            self.settle(index, out);
+                        }
+                        _ => {}
+                    }
+                    let bin = match *op {
+                        AssignOp::Add => BinOp::Add,
+                        AssignOp::Sub => BinOp::Sub,
+                        AssignOp::Mul => BinOp::Mul,
+                        _ => BinOp::Div,
+                    };
+                    let current = self.reader(target);
+                    let amount = std::mem::replace(value, Expr { id: 0, span, kind: ExprKind::Bool(false) });
+                    *value = self.node(ExprKind::Binary { op: bin, lhs: Box::new(current), rhs: Box::new(amount) }, Type::Float, span);
+                    *op = AssignOp::Set;
+                } else if !leaves || direct {
                     self.expr(value, out);
                 } else {
                     // The object and the position are computed first, then

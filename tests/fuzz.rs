@@ -139,6 +139,27 @@ fn pos_label(n: int) -> string! {
     return "n{n % 1000}"
 }
 
+struct Sample {
+    label: string
+    value: float
+    history: [float]
+}
+
+fn average(xs: [float]) -> float {
+    if xs.len() == 0 {
+        return 0
+    }
+    var total = 0.0
+    for x in xs {
+        total += x
+    }
+    return total / xs.len()
+}
+
+var g_ratio = 1.5
+var g_floats: [float] = [0.5, 2, -1.25]
+var g_sample = Sample{label: "s", value: 3, history: []}
+var g_rates: map<string, float> = {"one": 1}
 var g_ages: map<string, int> = {"a": 1}
 var g_ids: map<int, string> = {}
 var g_count = 0
@@ -960,7 +981,8 @@ impl Gen {
 
     fn stmt(&mut self) {
         self.budget -= 1;
-        match self.rng.below(31) {
+        match self.rng.below(35) {
+            31..=34 => self.float_op(),
             26 | 27 => self.catch_stmt(),
             28..=30 => self.map_op(),
             0..=4 => self.declare(),
@@ -1570,6 +1592,111 @@ impl Gen {
         }
     }
 
+    /// A float expression. Values stay moderate: what is stored is reduced
+    /// with `%` first, and divisors are kept away from zero.
+    fn float(&mut self, depth: u32) -> String {
+        let choice = if depth == 0 { self.rng.below(5) } else { self.rng.below(18) };
+        match choice {
+            0 => self.rng.pick(&["0.5", "1.5", "2.0", "0.1", "3.25", "100.0", "0.001", "1e3", "2.5e-3", "7.0"]).to_string(),
+            1 => "g_ratio".to_string(),
+            2 => "g_sample.value".to_string(),
+            3 => format!("float({})", self.bounded_int(1)),
+            4 => "average(g_floats)".to_string(),
+            5 | 6 => format!("({} {} {})", self.float(depth - 1), self.rng.pick(&["+", "-", "*"]), self.float(depth - 1)),
+            7 => format!("({} / (abs({}) + 0.5))", self.float(depth - 1), self.float(depth - 1)),
+            8 => format!("({} % {})", self.float(depth - 1), self.rng.pick(&["3.0", "0.7", "1000.0", "-2.5"])),
+            9 => format!("sqrt(abs({}))", self.float(depth - 1)),
+            10 => format!("{}({}, {})", self.rng.pick(&["min", "max"]), self.float(depth - 1), self.float(depth - 1)),
+            11 => format!("(-{})", self.float(depth - 1)),
+            // An int where a float is expected.
+            12 => format!("({} {} {})", self.float(depth - 1), self.rng.pick(&["+", "*", "-"]), self.rng.between(-9, 9)),
+            13 => format!("({} * {})", self.bounded_int(1), self.float(depth - 1)),
+            14 => format!("abs({})", self.float(depth - 1)),
+            15 => format!("(parse_float({}) or {})", self.rng.pick(&["\"2.5\"", "\"1e2\"", "\"x\"", "\" -0.125 \"", "\"\"", "str(g_ratio)"]), self.float(depth - 1)),
+            16 => format!("(g_rates.get({}) or 0.25)", self.rng.pick(&["\"one\"", "\"two\"", "\"k\""])),
+            _ => "(g_floats.first() or 9.5)".to_string(),
+        }
+    }
+
+    fn float_op(&mut self) {
+        let e = self.calmly(|g| g.float(3));
+        let k = self.rng.between(0, 3);
+        match self.rng.below(16) {
+            0 | 1 => self.line(&format!("g_ratio = ({e}) % 1000.0")),
+            2 => {
+                let op = self.rng.pick(&["+=", "-=", "*=", "/="]);
+                let amount = self.rng.pick(&["0.5", "2", "1.25", "3", "g_sample.value"]);
+                self.line(&format!("g_ratio {op} {amount}"));
+                self.line("g_ratio = g_ratio % 1000.0");
+            }
+            3 => {
+                let op = self.rng.pick(&["+=", "-=", "*=", "/="]);
+                let picked = self.rng.pick(&["0.5", "2", "4.0"]);
+                self.line(&format!("g_sample.value {op} {}", picked));
+                self.line("g_sample.value = g_sample.value % 1000.0");
+            }
+            4 => {
+                self.line("if g_floats.len() < 12 {");
+                self.line(&format!("    g_floats.push(({e}) % 1000.0)"));
+                self.line("}");
+            }
+            5 => {
+                let op = self.rng.pick(&["=", "+=", "*=", "/="]);
+                self.line(&format!("if g_floats.len() > {k} {{"));
+                let picked = self.rng.pick(&["0.5", "2", "g_ratio"]);
+                self.line(&format!("    g_floats[{k}] {op} {}", picked));
+                self.line(&format!("    g_floats[{k}] = g_floats[{k}] % 1000.0"));
+                self.line("}");
+            }
+            6 => self.line(&format!("print({e}, g_ratio, \"{{g_sample.value}}/{{g_ratio}}\")")),
+            7 => {
+                if self.loops == 0 {
+                    self.line("print(g_floats, g_floats.sort(), g_sample, g_rates, average(g_floats))");
+                } else {
+                    self.line("print(g_floats.len(), g_ratio)");
+                }
+            }
+            8 => {
+                let op = self.rng.pick(&["<", "<=", ">", ">=", "==", "!="]);
+                let other = self.calmly(|g| g.float(2));
+                self.line(&format!("if {e} {op} {other} {{"));
+                self.line("    g_count = (g_count + 1) % 1000");
+                self.line("} else {");
+                self.line("    g_text += \"f\"");
+                self.line("}");
+            }
+            9 => {
+                let picked = self.rng.pick(&["floor", "ceil", "round", "int"]);
+                self.line(&format!("g_count = (g_count + {}(({e}) % 5000.0)) % 1000", picked));
+            }
+            10 => {
+                self.line("if g_sample.history.len() < 10 {");
+                self.line("    g_sample.history.push(g_ratio)");
+                self.line("}");
+            }
+            11 => {
+                let key = self.rng.pick(&["\"one\"", "\"two\"", "\"k\""]);
+                self.line(&format!("g_rates[{key}] = ({e}) % 1000.0"));
+                self.line(&format!("g_rates[{key}] += 1"));
+            }
+            12 => {
+                let name = self.fresh("f");
+                let picked = self.rng.between(-5, 5);
+                self.line(&format!("var {name}: float = {}", picked));
+                self.line(&format!("{name} += {e}"));
+                self.line(&format!("print({name} % 1000.0, str({name} % 10.0).len(), [{name} % 2.0, 1])"));
+            }
+            13 => {
+                let picked = self.rng.pick(&["0.5", "2", "g_ratio"]);
+                self.line(&format!("print(g_floats.contains({picked}), g_floats.index_of(2.0), g_floats == g_floats.slice(0, 20), [g_ratio] == [g_ratio])"));
+            }
+            14 => self.line("print(g_floats.join(\", \"), g_floats.reverse(), g_rates.values())"),
+            _ => {
+                self.line(&format!("g_sample = Sample{{label: g_sample.label, value: ({e}) % 1000.0, history: g_sample.history}}"));
+            }
+        }
+    }
+
     fn map_op(&mut self) {
         // Keys are computed without calls, so that two uses of the same key
         // expression in a statement give the same key.
@@ -1848,6 +1975,7 @@ impl Gen {
         }
         g.line("print(g_count, g_text, g_list, g_names, g_point)");
         g.line("print(g_ages, g_ids)");
+        g.line("print(g_ratio, g_floats, g_sample, g_rates)");
         g.line("print(team.name, team.members.len(), team.scores, team.total())");
         g.line("print(team)");
         g.line("var shown = 0");

@@ -24,7 +24,7 @@ really uses, the runtime's included, end up in it.
 
 The native target is being built up step by step. It currently supports:
 
-- `int` (a real 64-bit integer), `bool`, `string`
+- `int` (a real 64-bit integer), `float` (64 bits), `bool`, `string`
 - structs with methods, interfaces, struct equality
 - lists: literals, indexing, `for ... in`, and the methods `len`, `push`,
   `pop`, `first`, `last`, `insert`, `remove`, `clear`, `contains`,
@@ -39,14 +39,17 @@ The native target is being built up step by step. It currently supports:
 - `var`, assignment, `if` / `else`, `while`, `for i in a..b`, `break`,
   `continue`, `return`
 - arithmetic, comparisons, `&&`, `||`, `!`
+- floats: arithmetic and `%`, automatic conversion from `int`, `float`,
+  `int`, `sqrt`, `pow`, `floor`, `ceil`, `round`, `abs`, `min`, `max`,
+  `parse_float`, `random`, `random_int`
 - strings: interpolation, `+`, `+=`, comparisons, `s[i]`, `for c in s`, and
   the methods `len`, `upper`, `lower`, `trim`, `contains`, `starts_with`,
   `ends_with`, `index_of`, `slice`, `replace`, `split`, `chars`, `repeat`
 - `print`, `str`, `parse_int`, `abs`, `min`, `max`, `exit`, `panic`
 - modules (`import`)
 
-Anything else (floats, lambdas, `fork`, channels, `map` / `filter` /
-`sort_by`, `onyx test`) is rejected with error
+Anything else (lambdas, `fork`, channels, `map` / `filter` / `sort_by`,
+files, `onyx test`) is rejected with error
 `E0500` rather than compiled incorrectly. Those programs still run on the
 default JavaScript target. Functions that are never called are not compiled,
 so an unsupported feature in unused code does not get in the way.
@@ -65,6 +68,13 @@ Known gaps in what is supported:
   bytes: `s[i]` and `slice` have to walk from the start of the string when it
   holds accents or other non-ASCII characters. Use `for c in s` to go through
   a long text; it is a single pass.
+- `pow` can differ from the JavaScript target in the last digit (both are
+  within one unit in the last place of the exact result). Every other float
+  operation, and the text of floats, is identical.
+- Converting a float that is not a number, or too big for an `int`, with
+  `int`, `floor`, `ceil` or `round` gives an unspecified int.
+- A float variable is stored in memory after every statement; computations
+  inside one expression stay in the processor's float registers.
 - Adding or removing keys of a map inside a `for` loop over that same map
   is not specified: the two targets may visit different keys afterwards.
 - Only Linux on x86-64 is supported.
@@ -161,6 +171,10 @@ In the native code generator (`src/native/mod.rs`, `src/native/plan.rs`):
   `split("")` hand out the same 128 constant strings for ASCII characters;
   only accented and other multi-byte characters are allocated. Searching
   and counting skip eight ASCII bytes at a time.
+- **Floats.** An expression such as `a * b + c * d` is computed in the
+  SSE registers from start to end. Converting an int happens where the
+  checker saw one used as a float, and a literal such as the 2 of `2 * x` is
+  converted when the program is compiled.
 - **Lists.** Reading an element is a bounds check and a load; `push` stores
   in place when the list has room.
 - **Maps.** A hash table with open addressing over a dense array of entries:
@@ -180,6 +194,7 @@ last stage differs.
 
 | File | Role |
 | --- | --- |
+| `src/native/widen.rs` | Makes conversions from `int` to `float` explicit |
 | `src/native/lower.rs` | Rewrites statements so that every `?` stands on its own |
 | `src/native/mod.rs` | Walks the checked program and emits machine code |
 | `src/native/plan.rs` | Chooses the variables that live in registers |
@@ -195,11 +210,21 @@ the program's top-level variables. The conventions are described at the top
 of `mod.rs`.
 
 The runtime (the memory allocator, reference counting, strings, lists, maps,
-printing, equality) is ordinary Onyx code compiled along with every program.
+printing, equality, the text of floats, `pow`) is ordinary Onyx code compiled along with every program.
 It relies on a few low-level operations that only it may use: reading and
 writing memory (`__load8`, `__store64`, ...), copying bytes (`__copy`) and
 calling the kernel (`__syscall`). The layout of objects in memory is
 documented at the top of `runtime.ox`.
+
+## Floats as text
+
+Writing a float in decimal and reading one back is done exactly, by the
+runtime itself (`__rt_float_str` and `__rt_parse_float` in `runtime.ox`).
+A float is shown with the fewest digits that read back as the same float,
+so `0.1 + 0.2` is `0.30000000000000004` and `0.1` stays `0.1`; a string of
+any length is read as the float nearest to the number it spells. Both need
+numbers of more than 64 bits, which the runtime builds from 32-bit pieces.
+They were compared with Node.js on tens of thousands of random floats.
 
 ## How it is tested
 
@@ -216,9 +241,9 @@ documented at the top of `runtime.ox`.
 
 ## Roadmap for this target
 
-1. Floats
-2. Lambdas and closures, and with them `map`, `filter` and `sort_by`
-3. Files, arguments, `input`
-4. `fork` and channels
-5. Weak references, to break cycles
+1. Lambdas and closures, and with them `map`, `filter` and `sort_by`
+2. Files, arguments, `input`
+3. `fork` and channels
+4. Weak references, to break cycles
+5. Float variables in registers
 6. Other systems (ARM64, Windows, macOS)
