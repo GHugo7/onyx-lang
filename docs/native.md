@@ -48,10 +48,11 @@ The native target is being built up step by step. It currently supports:
   the methods `len`, `upper`, `lower`, `trim`, `contains`, `starts_with`,
   `ends_with`, `index_of`, `slice`, `replace`, `split`, `chars`, `repeat`
 - `print`, `str`, `parse_int`, `abs`, `min`, `max`, `exit`, `panic`
+- the outside world: `read_file`, `write_file`, `append_file`,
+  `file_exists`, `args`, `env`, `input`, `now`, `sleep`
 - modules (`import`)
 
-Anything else (`fork`, channels, files, `args`, `input`, `onyx test`) is
-rejected with error
+Anything else (`fork`, channels, `fetch`, `onyx test`) is rejected with error
 `E0500` rather than compiled incorrectly. Those programs still run on the
 default JavaScript target. Functions that are never called are not compiled,
 so an unsupported feature in unused code does not get in the way.
@@ -77,6 +78,8 @@ Known gaps in what is supported:
   `int`, `floor`, `ceil` or `round` gives an unspecified int.
 - A float variable is stored in memory after every statement; computations
   inside one expression stay in the processor's float registers.
+- A file is read as it is: bytes that are not valid UTF-8 are kept, where
+  the JavaScript target replaces them.
 - Adding or removing keys of a map inside a `for` loop over that same map
   is not specified: the two targets may visit different keys afterwards.
 - Only Linux on x86-64 is supported.
@@ -251,6 +254,16 @@ point to; like everything else, the box is freed when the last of them goes
 away. A captured variable that never changes afterwards is copied instead,
 which costs nothing more.
 
+## Talking to the system
+
+Files, arguments, the environment, the keyboard and the clock are reached
+with system calls of the Linux kernel, made by the runtime itself: `open`,
+`read`, `write`, `close`, `access`, `clock_gettime`, `nanosleep`. There is
+no C library in between. The arguments and the environment are read from
+the stack, where the kernel puts them when a program starts. Input is read
+4096 bytes at a time, so reading a large file line by line with `input`
+stays fast.
+
 ## Floats as text
 
 Writing a float in decimal and reading one back is done exactly, by the
@@ -276,8 +289,8 @@ They were compared with Node.js on tens of thousands of random floats.
 
 ## Roadmap for this target
 
-1. Files, arguments, `input`
-2. `fork` and channels
-3. Weak references, to break cycles
-4. Float variables in registers
+1. `fork` and channels
+2. Weak references, to break cycles
+3. Float variables in registers
+4. `fetch`, and `onyx test`
 5. Other systems (ARM64, Windows, macOS)

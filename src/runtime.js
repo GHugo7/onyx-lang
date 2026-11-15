@@ -255,7 +255,14 @@ const $rt = (() => {
     try {
       return f(fs);
     } catch (e) {
-      fail("cannot " + what + " " + repr(path) + ": " + (e.code === "ENOENT" ? "no such file or directory" : e.message));
+      const reasons = {
+        ENOENT: "no such file or directory",
+        EACCES: "permission denied",
+        EISDIR: "is a directory",
+        ENOTDIR: "not a directory",
+        ENOSPC: "no space left on device",
+      };
+      fail("cannot " + what + " " + repr(path) + ": " + (reasons[e.code] || e.message));
     }
   };
   const readFile = (path) => fsCall("read", path, (fs) => fs.readFileSync(path, "utf8"));

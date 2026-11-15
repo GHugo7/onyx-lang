@@ -67,6 +67,11 @@ const __S_FREE = 56        // free blocks of n bytes are chained from __S_FREE +
 
 const __S_SCRATCH = 1088   // address of the working memory of float conversions, once made
 const __S_RANDOM = 1096    // state of the random number generator
+const __S_START = 1104     // the stack as the kernel made it: argument count, arguments, environment
+const __S_IN = 1112        // address of the input buffer, once made
+const __S_IN_AT = 1120     // next byte to hand out from it
+const __S_IN_END = 1128    // end of what was read into it
+const __S_TIME = 1136      // 16 bytes for the kernel to write a time into
 
 const __SMALL = 1024       // blocks up to this size come from chunks
 const __CHUNK = 1048576
@@ -2963,6 +2968,245 @@ fn __rt_list_sort(list: int) -> int {
     __store64(out + 24, src)
     __rt_free(dst, n * 8)
     return out
+}
+
+// ---- the outside world: arguments, environment, files, keyboard, clock ----
+//
+// All of it goes through system calls of the Linux kernel, which report a
+// problem by returning a small negative number.
+
+// A string made from bytes that end with a zero, as the kernel gives them.
+fn __rt_from_c(at: int) -> int {
+    var n = 0
+    while __load8(at + n) != 0 {
+        n += 1
+    }
+    var s = __rt_new_str(n)
+    __copy(s + 16, at, n)
+    return s
+}
+
+// Room for the bytes of `s` and a zero, as blocks are sized: in multiples of 8.
+fn __rt_c_size(s: string) -> int {
+    return (__load32(__str_ptr(s) + 8) + 8) / 8 * 8
+}
+
+// The opposite: a copy of `s` followed by a zero, in a block of
+// `__rt_c_size(s)` bytes that the caller frees.
+fn __rt_to_c(s: string) -> int {
+    var p = __str_ptr(s)
+    var n = __load32(p + 8)
+    var block = __rt_alloc(__rt_c_size(s))
+    __copy(block, p + 16, n)
+    __store8(block + n, 0)
+    return block
+}
+
+// When a program starts, its stack holds the number of arguments, their
+// addresses (the program's name first), a zero, then the environment.
+fn __rt_args(td: int) -> int {
+    var start = __load64(__state() + __S_START)
+    var count = __load64(start)
+    var out = __rt_list_new(td, count)
+    var i = 1
+    while i < count {
+        __rt_list_push(out, __rt_from_c(__load64(start + 8 + i * 8)))
+        i += 1
+    }
+    return out
+}
+
+fn __rt_env(name: string) -> string! {
+    var p = __str_ptr(name)
+    var n = __load32(p + 8)
+    var start = __load64(__state() + __S_START)
+    var at = start + 8 + (__load64(start) + 1) * 8
+    // Each entry reads NAME=value.
+    while __load64(at) != 0 {
+        var entry = __load64(at)
+        if __rt_same_c(entry, p + 16, n) && __load8(entry + n) == 61 {
+            return __ptr_str(__rt_from_c(entry + n + 1))
+        }
+        at += 8
+    }
+    fail "environment variable " + __rt_quote(p) + " is not set"
+}
+
+// Whether the zero-ended bytes at `c` start with the `n` bytes at `b`.
+fn __rt_same_c(c: int, b: int, n: int) -> bool {
+    var i = 0
+    while i < n {
+        if __load8(c + i) != __load8(b + i) || __load8(c + i) == 0 {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// What went wrong, from the number the kernel returned.
+fn __rt_reason(code: int) -> string {
+    if code == -2 {
+        return "no such file or directory"
+    }
+    if code == -13 {
+        return "permission denied"
+    }
+    if code == -21 {
+        return "is a directory"
+    }
+    if code == -20 {
+        return "not a directory"
+    }
+    if code == -28 {
+        return "no space left on device"
+    }
+    return "system error " + __rt_int_str(-code)
+}
+
+fn __rt_read_file(path: string) -> string! {
+    var name = __rt_to_c(path)
+    var fd = __syscall(2, name, 0, 0, 0, 0, 0)          // open, for reading
+    __rt_free(name, __rt_c_size(path))
+    if fd < 0 {
+        fail "cannot read " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(fd)
+    }
+    // Read until the end, into a string that doubles when it is full.
+    var text = __rt_new_str(4000)
+    var used = 0
+    while true {
+        var room = __load32(text + 12)
+        if used == room {
+            var bigger = __rt_new_str(room * 2)
+            __copy(bigger + 16, text + 16, used)
+            __store32(text + 8, 0)
+            __rt_release(text)
+            text = bigger
+            room = __load32(text + 12)
+        }
+        var got = __syscall(0, fd, text + 16 + used, room - used, 0, 0, 0)
+        if got == -4 {
+            continue                                    // interrupted: try again
+        }
+        if got < 0 {
+            __syscall(3, fd, 0, 0, 0, 0, 0)
+            __store32(text + 8, 0)
+            __rt_release(text)
+            fail "cannot read " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(got)
+        }
+        if got == 0 {
+            break
+        }
+        used += got
+    }
+    __syscall(3, fd, 0, 0, 0, 0, 0)                     // close
+    __store32(text + 8, used)
+    return __ptr_str(text)
+}
+
+// Writes `text` to the file, replacing it (flags 577: write, create,
+// truncate) or adding at its end (flags 1089: write, create, append).
+fn __rt_write_file(path: string, text: string, flags: int) -> void! {
+    var name = __rt_to_c(path)
+    var fd = __syscall(2, name, flags, 420, 0, 0, 0)    // 420 is rw-r--r--
+    __rt_free(name, __rt_c_size(path))
+    if fd < 0 {
+        fail "cannot write " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(fd)
+    }
+    var p = __str_ptr(text)
+    var n = __load32(p + 8)
+    var done = 0
+    while done < n {
+        var written = __syscall(1, fd, p + 16 + done, n - done, 0, 0, 0)
+        if written > 0 {
+            done += written
+        } else if written != -4 {
+            __syscall(3, fd, 0, 0, 0, 0, 0)
+            fail "cannot write " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(written)
+        }
+    }
+    __syscall(3, fd, 0, 0, 0, 0, 0)
+}
+
+fn __rt_file_exists(path: string) -> bool {
+    var name = __rt_to_c(path)
+    var found = __syscall(21, name, 0, 0, 0, 0, 0) == 0     // access
+    __rt_free(name, __rt_c_size(path))
+    return found
+}
+
+// The next byte of standard input, or -1 at its end. Input is read 4096
+// bytes at a time.
+fn __rt_in_byte() -> int {
+    var state = __state()
+    var buffer = __load64(state + __S_IN)
+    if buffer == 0 {
+        buffer = __rt_alloc(4096)
+        __store64(state + __S_IN, buffer)
+    }
+    var at = __load64(state + __S_IN_AT)
+    if at == __load64(state + __S_IN_END) {
+        var got = -4
+        while got == -4 {
+            got = __syscall(0, 0, buffer, 4096, 0, 0, 0)
+        }
+        if got <= 0 {
+            return -1
+        }
+        at = 0
+        __store64(state + __S_IN_END, got)
+    }
+    __store64(state + __S_IN_AT, at + 1)
+    return __load8(buffer + at)
+}
+
+// Shows `prompt` and reads one line from the keyboard, without its end of line.
+fn __rt_input(prompt: string) -> string {
+    var p = __str_ptr(prompt)
+    __rt_out(p + 16, __load32(p + 8))
+    __rt_flush()
+    var line = __rt_new_str(120)
+    var used = 0
+    while true {
+        var c = __rt_in_byte()
+        if c < 0 || c == 10 {
+            break
+        }
+        if used == __load32(line + 12) {
+            var bigger = __rt_new_str(used * 2)
+            __copy(bigger + 16, line + 16, used)
+            __store32(line + 8, 0)
+            __rt_release(line)
+            line = bigger
+        }
+        __store8(line + 16 + used, c)
+        used += 1
+    }
+    if used > 0 && __load8(line + 16 + used - 1) == 13 {
+        used -= 1                                       // a line that ended with \r\n
+    }
+    __store32(line + 8, used)
+    return __ptr_str(line)
+}
+
+// Milliseconds since 1970 (clock_gettime gives seconds and nanoseconds).
+fn __rt_now() -> int {
+    var time = __state() + __S_TIME
+    __syscall(228, 0, time, 0, 0, 0, 0)
+    return __load64(time) * 1000 + __load64(time + 8) / 1000000
+}
+
+fn __rt_sleep(ms: int) {
+    if ms <= 0 {
+        return
+    }
+    __rt_flush()
+    var time = __state() + __S_TIME
+    __store64(time, ms / 1000)
+    __store64(time + 8, ms % 1000 * 1000000)
+    // If a signal interrupts the sleep, the kernel writes what is left.
+    while __syscall(35, time, time, 0, 0, 0, 0) == -4 {
+    }
 }
 
 // ---- output ----

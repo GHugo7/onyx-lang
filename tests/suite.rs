@@ -257,6 +257,38 @@ mod native {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Files, arguments, environment and keyboard input: the program is run
+    /// on both targets with the same surroundings and must print the same.
+    #[test]
+    fn files_arguments_and_input() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut outputs = Vec::new();
+        for target in ["js", "native"] {
+            let dir = std::env::temp_dir().join(format!("onyx-io-{target}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut child = Command::new(ONYX)
+                .args(["run", "--target", target, "--leak-check", "tests/io/files.ox"])
+                .arg(&dir)
+                .args(["one", "two words"])
+                .env("ONYX_TEST_VALUE", "a=b c")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(b"Ada\r\n36\nb\nc d\n").unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert_eq!(out.status.code(), Some(0), "{target}: {}", String::from_utf8_lossy(&out.stderr));
+            outputs.push(String::from_utf8_lossy(&out.stdout).replace(dir.to_str().unwrap(), "DIR"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        assert!(outputs[1].contains("hello Ada, next year you are 37"), "{}", outputs[1]);
+        assert!(outputs[1].contains("[\"b\", \"c d\"] true"), "{}", outputs[1]);
+        assert_eq!(outputs[0], outputs[1]);
+    }
+
     #[test]
     fn runtime_internals_are_hidden_from_programs() {
         let out = run_source("internal.ox", "fn main() {\n    print(__load64(0))\n    __rt_exit(3)\n}\n");

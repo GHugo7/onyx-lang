@@ -180,6 +180,9 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
     g.asm.mov_imm(R9, 0);
     g.asm.syscall();
     g.asm.mov(R15, RAX);
+    // The stack is still as the kernel made it: remember where the
+    // arguments and the environment are.
+    g.asm.store(R15, 1104, RSP);
     g.asm.mov(RBP, RSP);
     for item in &program.items {
         if let Item::Global(Stmt { kind: StmtKind::Let { name, init, .. }, .. }) = item {
@@ -3265,6 +3268,17 @@ impl<'a> Gen<'a> {
             "ceil" => self.call_rt("__rt_ceil", &[Arg::Value(&args[0])], true),
             "round" => self.call_rt("__rt_round_float", &[Arg::Value(&args[0])], true),
             "parse_float" => self.call_rt_fallible("__rt_parse_float", &[Arg::Borrow(&args[0])], true),
+            "args" => self.call_rt("__rt_args", &[Arg::Descriptor(Type::List(Box::new(Type::Str)))], true),
+            "env" => self.call_rt_fallible("__rt_env", &[Arg::Borrow(&args[0])], true),
+            "read_file" => self.call_rt_fallible("__rt_read_file", &[Arg::Borrow(&args[0])], true),
+            "write_file" | "append_file" => {
+                let flags = if name == "write_file" { 577 } else { 1089 };
+                self.call_rt_fallible("__rt_write_file", &[Arg::Borrow(&args[0]), Arg::Borrow(&args[1]), Arg::Const(flags)], false);
+            }
+            "file_exists" => self.call_rt("__rt_file_exists", &[Arg::Borrow(&args[0])], true),
+            "input" => self.call_rt("__rt_input", &[Arg::Borrow(&args[0])], true),
+            "now" => self.call_rt("__rt_now", &[], true),
+            "sleep" => self.call_rt("__rt_sleep", &[Arg::Value(&args[0])], false),
             "random" => self.call_rt("__rt_random", &[], true),
             "random_int" => self.call_rt("__rt_random_int", &[Arg::Value(&args[0]), Arg::Value(&args[1])], true),
             "abs" if self.ty(e) == Type::Float => {
