@@ -45,6 +45,7 @@ pub fn lower(program: &mut Program, an: &mut Analysis) {
                     l.block(&mut m.body);
                 }
             }
+            Item::Check { body, .. } => l.block(body),
             // A top-level variable may hold a lambda.
             Item::Global(Stmt { kind: StmtKind::Let { init, .. }, .. }) => l.lambdas(init),
             _ => {}

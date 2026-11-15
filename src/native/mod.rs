@@ -59,6 +59,11 @@ const LIST_CAP: i32 = 16;
 const LIST_DATA: i32 = 24;
 const FIELDS: i32 = 8;
 
+/// Where the test runner notes, in the runtime's state, the stack pointer
+/// and the address to come back to when a check is abandoned.
+const TEST_STACK: i32 = 1152;
+const TEST_RESUME: i32 = 1160;
+
 /// Stack space in which the runtime writes the text of a number (see
 /// `__rt_int_into` in runtime.ox).
 const NUMBER_BUFFER: i32 = 40;
@@ -69,13 +74,21 @@ const VARIABLE_REGS: [Reg; 6] = [RBX, R12, R13, R14, RSI, RDI];
 /// Key of the `self` parameter of a method (its position is the method's name).
 const SELF: u8 = 3;
 
-pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> Result<Vec<u8>, Vec<Diagnostic>> {
+/// `tests`: build a program that runs the `check` blocks instead of `main`
+/// (the sources are needed to say where an expectation failed).
+pub fn generate(
+    program: &mut Program,
+    an: &mut Analysis,
+    leak_check: bool,
+    tests: Option<&crate::diagnostics::SourceMap>,
+) -> Result<Vec<u8>, Vec<Diagnostic>> {
     widen::widen(program, an);
     capture::capture(program, an);
     lower::lower(program, an);
     let (program, an) = (&*program, &*an);
     let mut g = Gen {
         an,
+        sources: tests,
         asm: Asm::default(),
         diags: Vec::new(),
         items: HashMap::new(),
@@ -106,6 +119,7 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
     // Every function gets a label. Its code is only generated when something refers to it.
     let mut global_order = Vec::new();
     let mut lambdas: Vec<&Expr> = Vec::new();
+    let mut checks: Vec<(String, String)> = Vec::new();
     for item in &program.items {
         match item {
             Item::Fn(f) => {
@@ -139,6 +153,14 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
                     let item = FnItem { body: &m.body, fallible: m.fallible, span: m.name_span, params, ret: sig.ret.clone(), captures: Vec::new() };
                     g.add_function(method_key(&s.name, &m.name), item);
                 }
+            }
+            // A `check` block is a function without parameters.
+            Item::Check { name, body } if tests.is_some() => {
+                lambdas_in(body, &mut lambdas);
+                let key = format!("check:{}", checks.len());
+                let item = FnItem { body, fallible: false, span: body.span, params: Vec::new(), ret: Type::Void, captures: Vec::new() };
+                g.add_function(key.clone(), item);
+                checks.push((key, name.clone()));
             }
             Item::Global(Stmt { kind: StmtKind::Let { name, init, .. }, .. }) => {
                 if let ExprKind::Lambda { .. } = &init.kind {
@@ -190,7 +212,34 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
             g.expr_into(init, Loc::Global(offset));
         }
     }
-    if let Some(main) = g.items.get("main") {
+    if tests.is_some() {
+        // Each check runs in turn. Before it starts, the place to come back
+        // to is noted (the stack pointer and an address): a failed `expect`
+        // or a panic abandons the check by jumping there (`__unwind`).
+        g.asm.push_imm(checks.len() as i32);
+        g.call_runtime("__rt_checks_begin", 1);
+        for (key, name) in &checks {
+            let (escaped, next) = (g.asm.new_label(), g.asm.new_label());
+            let name = g.string(name);
+            g.asm.lea(RAX, escaped);
+            g.asm.store(R15, TEST_RESUME, RAX);
+            g.asm.store(R15, TEST_STACK, RSP);
+            let label = g.function_label(key);
+            g.asm.call(label);
+            g.asm.lea(RAX, name);
+            g.asm.push(RAX);
+            g.call_runtime("__rt_check_passed", 1);
+            g.asm.jmp(next);
+            g.asm.bind(escaped);
+            g.asm.lea(RAX, name);
+            g.asm.push(RAX);
+            g.call_runtime("__rt_check_failed", 1);
+            g.asm.bind(next);
+        }
+        g.asm.store_imm(R15, TEST_STACK, 0);
+        g.asm.push_imm(checks.len() as i32);
+        g.call_runtime("__rt_checks_end", 1);
+    } else if let Some(main) = g.items.get("main") {
         let can_fail = main.fallible;
         let label = g.function_label("main");
         g.asm.call(label);
@@ -203,7 +252,7 @@ pub fn generate(program: &mut Program, an: &mut Analysis, leak_check: bool) -> R
             g.asm.bind_short(fine);
         }
     }
-    if leak_check {
+    if leak_check && tests.is_none() {
         for name in global_order.iter().rev() {
             let (offset, ty) = g.globals[name].clone();
             if is_ref(&ty) {
@@ -498,6 +547,8 @@ enum Piece<'e> {
 
 struct Gen<'a> {
     an: &'a Analysis,
+    /// In test mode: the sources, to say where an expectation failed.
+    sources: Option<&'a crate::diagnostics::SourceMap>,
     asm: Asm,
     diags: Vec<Diagnostic>,
     /// Every function and method of the program, by name (or method key).
@@ -3250,6 +3301,23 @@ impl<'a> Gen<'a> {
             "parse_int" => self.call_rt_fallible("__rt_parse_int", &[Arg::Borrow(&args[0])], true),
             "exit" => self.call_rt("__rt_exit", &[Arg::Value(&args[0])], false),
             "panic" => self.call_rt("__rt_panic", &[Arg::Borrow(&args[0])], false),
+            "expect" => {
+                let place = match self.sources {
+                    Some(sources) => {
+                        let loc = sources.locate(e.span.start);
+                        let file = loc.file.rsplit(['/', '\\']).next().unwrap_or(loc.file);
+                        format!("{file}:{}", loc.line)
+                    }
+                    None => "an `expect`".to_string(),
+                };
+                let fine = self.asm.new_label();
+                self.cond_jump(&args[0], fine, true);
+                let place = self.string(&place);
+                self.asm.lea(RAX, place);
+                self.asm.push(RAX);
+                self.call_runtime("__rt_expect_failed", 1);
+                self.asm.bind(fine);
+            }
             "float" => {
                 self.float(e);
                 self.asm.movq_out(RAX, XMM0);
@@ -3453,6 +3521,10 @@ impl<'a> Gen<'a> {
                 self.asm.load(R10, RSP, 8);
                 self.asm.call_mem(R10, FIELDS);
                 self.asm.alu_imm(Alu::Add, RSP, 16);
+            }
+            "__unwind" => {
+                self.asm.load(RSP, R15, TEST_STACK);
+                self.asm.jmp_mem(R15, TEST_RESUME);
             }
             "__state" => self.asm.mov(RAX, R15),
             "__td_string" => {

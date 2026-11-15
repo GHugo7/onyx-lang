@@ -55,4 +55,55 @@ check "half rejects odd numbers" {
 }
 ```
 
+## Test files
+
+Tests can also live in a file of their own, next to the file they test:
+`basket.test.ox` holds the tests of `basket.ox`.
+
+```text
+basket.ox
+basket.test.ox
+```
+
+```text
+// basket.test.ox
+check "the total adds the prices" {
+    var b = Basket{items: []}
+    b.add(Item{name: "apple", price: 2.5})
+    expect(b.total() == 2.5)
+}
+```
+
+A test file is part of the file it tests: it uses its functions and structs
+directly, without `import`, including the private ones (those whose name
+starts with `_`). It may define helper functions and import other modules.
+`onyx run` and `onyx build` never look at it.
+
+```bash
+onyx test basket.ox
+```
+
+runs the `check` blocks of `basket.ox` and those of `basket.test.ox`
+(`onyx test basket.test.ox` does the same). Without a file,
+
+```bash
+onyx test
+```
+
+goes through the current folder and the folders inside it, and runs the
+tests of every file that has some. It exits with code 1 if a check failed
+anywhere. `onyx test some/folder` does the same for that folder.
+
+A check that fails does not stop the others: a failed `expect` or a panic
+(an index out of bounds, say) is reported, and the next check runs.
+
+```text
+running 3 checks
+  ok    the total adds the prices
+  FAIL  an empty basket is free (expectation failed at basket.test.ox:9)
+  ok    items can be removed
+
+2 passed, 1 failed
+```
+
 Next: [Modules](08-modules.md)

@@ -1,0 +1,24 @@
+basket.ox
+running 6 checks
+  ok    an empty basket is worth nothing
+  ok    the total adds the prices
+  ok    private functions are visible
+  FAIL  this one fails (expectation failed at basket.test.ox:22)
+  FAIL  a panic is caught (panic: index out of bounds: index 5, length 2)
+  ok    the checks after a failure still run
+
+4 passed, 2 failed
+
+lib/alone.test.ox
+running 1 check
+  ok    on its own
+
+1 passed, 0 failed
+
+lib/price.ox
+running 1 check
+  ok    tax is added
+
+1 passed, 0 failed
+
+3 files tested, 1 with failures

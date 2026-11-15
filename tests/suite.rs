@@ -137,6 +137,27 @@ fn documentation_examples_compile() {
 
 /// The native target writes Linux x86-64 executables, so these tests only run there.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+/// `onyx test` in a folder: the checks of each file and of its
+/// `name.test.ox`, on both targets, with the same report.
+#[test]
+fn test_files_are_found_and_run() {
+    let expected = std::fs::read_to_string("tests/testing/expected.txt").unwrap();
+    for target in ["js", "native"] {
+        let out = Command::new(std::fs::canonicalize(ONYX).unwrap())
+            .args(["test", "--target", target])
+            .current_dir("tests/testing")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{target}: two checks fail on purpose");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{target}");
+    }
+    // A test file can be named directly, and is ignored by `onyx run`.
+    let out = Command::new(ONYX).args(["test", "tests/testing/basket.test.ox"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("running 6 checks"));
+    let out = Command::new(ONYX).args(["run", "tests/testing/basket.ox"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "2.4\n");
+}
+
 mod native {
     use super::*;
 

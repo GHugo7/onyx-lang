@@ -52,7 +52,7 @@ The native target is being built up step by step. It currently supports:
   `file_exists`, `args`, `env`, `input`, `now`, `sleep`
 - modules (`import`)
 
-Anything else (`fork`, channels, `fetch`, `onyx test`) is rejected with error
+Anything else (`fork`, channels, `fetch`) is rejected with error
 `E0500` rather than compiled incorrectly. Those programs still run on the
 default JavaScript target. Functions that are never called are not compiled,
 so an unsupported feature in unused code does not get in the way.
@@ -264,6 +264,14 @@ the stack, where the kernel puts them when a program starts. Input is read
 4096 bytes at a time, so reading a large file line by line with `input`
 stays fast.
 
+## Tests
+
+`onyx test --target native` builds a program that calls every `check` block
+in turn. A failed `expect` or a panic must abandon the check and let the
+next one run, and there are no exceptions to do that with: before each
+check, the place to come back to (the stack pointer and an address) is
+noted, and a failure jumps straight back there.
+
 ## Floats as text
 
 Writing a float in decimal and reading one back is done exactly, by the
@@ -292,5 +300,5 @@ They were compared with Node.js on tens of thousands of random floats.
 1. `fork` and channels
 2. Weak references, to break cycles
 3. Float variables in registers
-4. `fetch`, and `onyx test`
+4. `fetch`
 5. Other systems (ARM64, Windows, macOS)

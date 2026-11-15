@@ -72,6 +72,9 @@ const __S_IN = 1112        // address of the input buffer, once made
 const __S_IN_AT = 1120     // next byte to hand out from it
 const __S_IN_END = 1128    // end of what was read into it
 const __S_TIME = 1136      // 16 bytes for the kernel to write a time into
+const __S_TEST = 1152      // `onyx test`: the stack pointer to restore when a check is abandoned (0 otherwise)
+const __S_TEST_WHY = 1168  // why the current check was abandoned
+const __S_TEST_FAILED = 1176
 
 const __SMALL = 1024       // blocks up to this size come from chunks
 const __CHUNK = 1048576
@@ -3295,7 +3298,69 @@ fn __rt_exit(code: int) {
     __syscall(231, code, 0, 0, 0, 0, 0)
 }
 
+// ---- `onyx test` ----
+//
+// The compiler writes the loop that calls every `check` block; these are
+// its helpers. A check that fails is abandoned on the spot: the reason is
+// noted and `__unwind` jumps back into that loop.
+
+fn __rt_line(text: string) {
+    var p = __str_ptr(text)
+    __rt_out(p + 16, __load32(p + 8))
+    var end = "\n"
+    __rt_out(__str_ptr(end) + 16, 1)
+    __rt_flush()
+}
+
+fn __rt_plural(count: int, word: string) -> string {
+    if count == 1 {
+        return __rt_int_str(count) + " " + word
+    }
+    return __rt_int_str(count) + " " + word + "s"
+}
+
+fn __rt_checks_begin(count: int) {
+    __rt_line("running " + __rt_plural(count, "check"))
+}
+
+fn __rt_check_passed(name: string) {
+    __rt_line("  ok    " + name)
+}
+
+fn __rt_check_abandon(why: string) {
+    var state = __state()
+    __rt_retain(__str_ptr(why))
+    __store64(state + __S_TEST_WHY, __str_ptr(why))
+    __unwind()
+}
+
+fn __rt_check_failed(name: string) {
+    var state = __state()
+    var why = __ptr_str(__load64(state + __S_TEST_WHY))
+    __store64(state + __S_TEST_FAILED, __load64(state + __S_TEST_FAILED) + 1)
+    __rt_line("  FAIL  " + name + " (" + why + ")")
+}
+
+fn __rt_checks_end(count: int) {
+    var failed = __load64(__state() + __S_TEST_FAILED)
+    __rt_line("")
+    __rt_line(__rt_int_str(count - failed) + " passed, " + __rt_int_str(failed) + " failed")
+    if failed > 0 {
+        __rt_exit(1)
+    }
+}
+
+fn __rt_expect_failed(place: string) {
+    if __load64(__state() + __S_TEST) != 0 {
+        __rt_check_abandon("expectation failed at " + place)
+    }
+    __rt_panic("expectation failed at " + place)
+}
+
 fn __rt_panic(message: string) {
+    if __load64(__state() + __S_TEST) != 0 {
+        __rt_check_abandon("panic: " + message)
+    }
     __rt_flush()
     __rt_write(2, "panic: ")
     __rt_write(2, message)

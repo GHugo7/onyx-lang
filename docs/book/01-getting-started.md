@@ -38,7 +38,8 @@ Every program starts in `fn main()`. Only declarations (`import`, `fn`,
 | --- | --- |
 | `onyx run file.ox [args]` | Compiles and runs the program |
 | `onyx check file.ox` | Reports errors without running |
-| `onyx test file.ox` | Runs the file's `check` blocks |
+| `onyx test file.ox` | Runs the file's `check` blocks, and those of `file.test.ox` |
+| `onyx test` | Runs every test of the folder |
 | `onyx build file.ox` | Writes `build/file.js`, which runs with `node` or in a browser |
 | `onyx explain E0200` | Explains an error code in detail |
 

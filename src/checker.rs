@@ -174,6 +174,7 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "__copy" => (vec![Int, Int, Int], Void, false, false),
         "__and" | "__or" | "__xor" | "__shl" | "__shr" | "__sar" => (vec![Int, Int], Int, false, false),
         "__call1" => (vec![Int, Int], Int, false, false),
+        "__unwind" => (vec![], Void, false, false),
         "__bits" => (vec![Float], Int, false, false),
         "__float" => (vec![Int], Float, false, false),
         "__state" => (vec![], Int, false, false),

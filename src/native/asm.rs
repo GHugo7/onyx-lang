@@ -668,6 +668,13 @@ impl Asm {
         self.mem(2, base, disp);
     }
 
+    /// Jumps to the address stored at `[base + disp]`.
+    pub fn jmp_mem(&mut self, base: Reg, disp: i32) {
+        self.rex_opt(0, 0, base);
+        self.buf.push(0xFF);
+        self.mem(4, base, disp);
+    }
+
     pub fn ret(&mut self) {
         self.buf.push(0xC3);
     }

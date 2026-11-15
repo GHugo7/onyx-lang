@@ -61,7 +61,8 @@ cargo install --git https://github.com/GHugo7/onyx-lang
 ```bash
 onyx run hello.ox          # compile and run
 onyx check hello.ox        # type-check only
-onyx test hello.ox         # run the file's `check` blocks
+onyx test hello.ox         # run the file's `check` blocks, and those of hello.test.ox
+onyx test                  # run every test of the folder
 onyx build hello.ox        # write build/hello.js
 onyx build --target native hello.ox   # write build/hello, a Linux executable
 onyx explain E0200         # explain an error code

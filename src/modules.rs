@@ -51,6 +51,7 @@ pub fn load(
     entry: &Path,
     sources: &mut SourceMap,
     prelude: Option<(&str, &str)>,
+    companion: Option<&Path>,
 ) -> Result<(Program, Option<(usize, usize)>), Result<Vec<Diagnostic>, String>> {
     let text = std::fs::read_to_string(entry)
         .map_err(|e| Err(format!("cannot read `{}`: {e}", entry.display())))?;
@@ -63,9 +64,21 @@ pub fn load(
         next_id: 0,
         used_names: HashSet::new(),
     };
-    loader
+    let main = loader
         .load_file(canonical, entry.to_string_lossy().to_string(), String::new(), &text)
         .map_err(|d| Ok(vec![d]))?;
+    // A test file (`name.test.ox`) is part of the file it tests: it sees
+    // everything in it, private names included, without importing it.
+    if let Some(path) = companion {
+        let text = std::fs::read_to_string(path).map_err(|e| Err(format!("cannot read `{}`: {e}", path.display())))?;
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let dir = canonical.parent().map(Path::to_path_buf).unwrap_or_default();
+        let (start, end) = loader.sources.add(path.to_string_lossy().to_string(), &text);
+        let (program, next_id) =
+            parser::parse(&loader.sources.text, start, end, loader.next_id).map_err(|d| Ok(vec![d]))?;
+        loader.next_id = next_id;
+        loader.absorb(main, dir, program).map_err(|d| Ok(vec![d]))?;
+    }
 
     let infos: Vec<ModInfo> = loader.modules.iter().map(module_info).collect();
     let mut diags = Vec::new();
@@ -134,8 +147,15 @@ impl<'a> Loader<'a> {
         let dir = canonical.parent().map(Path::to_path_buf).unwrap_or_default();
         self.by_path.insert(canonical, idx);
         self.modules.push(Module { name, items: Vec::new(), imports: HashMap::new() });
+        self.absorb(idx, dir, program)?;
+        self.order.push(idx);
+        Ok(idx)
+    }
 
-        let mut imports: HashMap<String, usize> = HashMap::new();
+    /// Adds the items of a parsed file, found in `dir`, to module `idx`,
+    /// loading what it imports.
+    fn absorb(&mut self, idx: usize, dir: PathBuf, program: Program) -> Result<(), Diagnostic> {
+        let mut imports: HashMap<String, usize> = std::mem::take(&mut self.modules[idx].imports);
         for item in &program.items {
             let Item::Import { path, alias, span } = item else { continue };
             let mut file = dir.join(path);
@@ -189,10 +209,9 @@ impl<'a> Loader<'a> {
             }
         }
 
-        self.modules[idx].items = program.items;
+        self.modules[idx].items.extend(program.items);
         self.modules[idx].imports = imports;
-        self.order.push(idx);
-        Ok(idx)
+        Ok(())
     }
 }
 

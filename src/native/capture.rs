@@ -49,6 +49,7 @@ pub fn capture(program: &mut Program, an: &mut Analysis) {
                     finder.function(&m.params, Some(m.name_span.start), &m.body);
                 }
             }
+            Item::Check { body, .. } => finder.function(&[], None, body),
             Item::Global(stmt) => {
                 finder.scopes.push(HashMap::new());
                 finder.frames.push(Vec::new());
@@ -89,6 +90,7 @@ pub fn capture(program: &mut Program, an: &mut Analysis) {
                     boxer.function(&m.params, Some(m.name_span.start), &mut m.body);
                 }
             }
+            Item::Check { body, .. } => boxer.function(&[], None, body),
             Item::Global(stmt) => {
                 boxer.scopes.push(HashMap::new());
                 boxer.stmt(stmt);

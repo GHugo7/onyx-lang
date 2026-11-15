@@ -24,7 +24,8 @@ Usage:
   onyx run <file.ox> [args...]     Compile and run a program
   onyx build <file.ox> [-o <out>]  Compile to build/<name>.js, or build/<name> with --target native
   onyx check <file.ox>             Check a program for errors without running it
-  onyx test <file.ox>              Run the `check` blocks of a file
+  onyx test [file.ox | folder]     Run the `check` blocks of a file and of its `name.test.ox`
+                                   file; without a file, every test of the folder
   onyx explain <code>              Explain an error code, e.g. `onyx explain E0200`
   onyx version                     Print the version
 
@@ -54,7 +55,7 @@ fn main() {
     let rest = &args[1..];
     match command.as_str() {
         "run" => run(rest, false),
-        "test" => run(rest, true),
+        "test" => test(rest),
         "build" => build(rest),
         "check" => {
             let (target, rest) = take_target(rest);
@@ -112,11 +113,13 @@ fn take_target(args: &[String]) -> (Target, Vec<String>) {
 
 /// Compiles a source file, printing diagnostics and exiting on error.
 fn compile(path: &Path, test_mode: bool, target: Target) -> Output {
+    // The tests of `name.ox` may live next to it, in `name.test.ox`.
+    let companion = test_mode.then(|| test_file_of(path)).flatten();
     let file = path.to_string_lossy();
     let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut sources = diagnostics::SourceMap::default();
     let prelude = (target == Target::Native).then_some(("<onyx runtime>", native::RUNTIME_SOURCE));
-    let loaded = modules::load(path, &mut sources, prelude);
+    let loaded = modules::load(path, &mut sources, prelude, companion.as_deref());
     let report = |diags: &[diagnostics::Diagnostic]| -> ! {
         for d in diags {
             eprintln!("{}", diagnostics::render(d, &sources, color));
@@ -141,7 +144,12 @@ fn compile(path: &Path, test_mode: bool, target: Target) -> Output {
             &analysis,
             &codegen_js::Options { sources: &sources, test_mode },
         )),
-        Target::Native => match native::generate(&mut program, &mut analysis, LEAK_CHECK.load(Ordering::Relaxed)) {
+        Target::Native => match native::generate(
+            &mut program,
+            &mut analysis,
+            LEAK_CHECK.load(Ordering::Relaxed),
+            test_mode.then_some(&sources),
+        ) {
             Ok(bytes) => Output::Native(bytes),
             Err(diags) => report(&diags),
         },
@@ -173,23 +181,109 @@ fn stem_of(file: &Path) -> String {
     file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
 }
 
+/// `name.test.ox` for `name.ox`, if that file exists.
+fn test_file_of(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".ox")?;
+    if stem.ends_with(".test") {
+        return None;
+    }
+    let candidate = path.with_file_name(format!("{stem}.test.ox"));
+    candidate.is_file().then_some(candidate)
+}
+
+/// The file that `name.test.ox` tests, if it exists.
+fn tested_file_of(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".test.ox")?;
+    let candidate = path.with_file_name(format!("{stem}.ox"));
+    candidate.is_file().then_some(candidate)
+}
+
+/// The files of a folder (and of the folders inside it) that have tests:
+/// those with a `name.test.ox` next to them, test files on their own, and
+/// those that contain `check` blocks.
+fn find_tests(dir: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        if path.is_dir() {
+            if !name.starts_with('.') && !matches!(name.as_str(), "target" | "build" | "node_modules") {
+                find_tests(&path, found);
+            }
+        } else if name.ends_with(".test.ox") {
+            // Reported under the file it tests, when there is one.
+            if tested_file_of(&path).is_none() {
+                found.push(path);
+            }
+        } else if name.ends_with(".ox") {
+            let has_checks = std::fs::read_to_string(&path)
+                .is_ok_and(|text| text.lines().any(|line| line.starts_with("check \"")));
+            if has_checks || test_file_of(&path).is_some() {
+                found.push(path);
+            }
+        }
+    }
+}
+
+fn test(args: &[String]) {
+    let (target, args) = take_target(args);
+    let given = args.first().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    if !given.is_dir() {
+        // One file: `name.ox`, or its `name.test.ox`, which is the same thing.
+        let file = tested_file_of(&given).unwrap_or(given);
+        exit(execute(&file, true, target, &[]));
+    }
+    let mut files = Vec::new();
+    find_tests(&given, &mut files);
+    if files.is_empty() {
+        println!("no tests found in `{}` (tests are `check` blocks, in `name.ox` or in `name.test.ox`)", given.display());
+        return;
+    }
+    let mut failed = 0;
+    for file in &files {
+        println!("{}", file.strip_prefix("./").unwrap_or(file).display());
+        // Each file is tested by a compiler of its own, so that one that
+        // does not compile does not stop the others.
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let name = if target == Target::Native { "native" } else { "js" };
+        let status = std::env::current_exe()
+            .and_then(|onyx| Command::new(onyx).args(["test", "--target", name]).arg(file).status());
+        if !status.is_ok_and(|s| s.success()) {
+            failed += 1;
+        }
+        println!();
+    }
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    println!("{} file{} tested, {} with failures", files.len(), plural(files.len()), failed);
+    exit(if failed > 0 { 1 } else { 0 });
+}
+
 fn run(args: &[String], test_mode: bool) {
     let (target, args) = take_target(args);
     let file = source_arg(&args);
-    if test_mode && target == Target::Native {
-        die("`onyx test` does not support the native target yet");
-    }
-    let output = compile(&file, test_mode, target);
+    exit(execute(&file, test_mode, target, &args[1..]));
+}
+
+/// Compiles and runs a file; returns the exit code of the program.
+fn execute(file: &Path, test_mode: bool, target: Target, args: &[String]) -> i32 {
+    let output = compile(file, test_mode, target);
     let extension = if target == Target::Js { ".js" } else { "" };
-    let tmp = std::env::temp_dir().join(format!("onyx-{}-{}{extension}", std::process::id(), stem_of(&file)));
+    let tmp = std::env::temp_dir().join(format!("onyx-{}-{}{extension}", std::process::id(), stem_of(file)));
     write_output(&tmp, &output);
+    // What was printed so far must come before what the program prints.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
     let status = match target {
-        Target::Js => Command::new("node").arg(&tmp).args(&args[1..]).status(),
-        Target::Native => Command::new(&tmp).args(&args[1..]).status(),
+        Target::Js => Command::new("node").arg(&tmp).args(args).status(),
+        Target::Native => Command::new(&tmp).args(args).status(),
     };
     let _ = std::fs::remove_file(&tmp);
     match status {
-        Ok(status) => exit(exit_code(status)),
+        Ok(status) => exit_code(status),
         Err(e) if target == Target::Native => die(&format!("cannot run the compiled program: {e}")),
         Err(_) => die("Onyx needs Node.js to run programs, but `node` was not found.\nInstall it from https://nodejs.org or use `onyx build` to only produce the .js file."),
     }
