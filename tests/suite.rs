@@ -333,6 +333,20 @@ mod native {
         assert_eq!(String::from_utf8_lossy(&out.stderr), "panic: send on a closed channel\n");
     }
 
+    /// Recursion without end is reported, in `main` and in a task, with the
+    /// message of the JavaScript target.
+    #[test]
+    fn stack_overflow_is_reported() {
+        let down = "fn down(n: int) -> int {\n    return down(n + 1) + 1\n}\n\n";
+        let in_main = format!("{down}fn main() {{\n    print(\"start\")\n    print(down(0))\n}}\n");
+        let in_task = format!("{down}fn main() {{\n    var done = chan<int>()\n    fork {{\n        done <- down(0)\n    }}\n    print(<-done)\n}}\n");
+        for (name, src) in [("deep.ox", in_main), ("deep_task.ox", in_task)] {
+            let out = run_source(name, &src);
+            assert_eq!(out.status.code(), Some(2), "{name}");
+            assert_eq!(String::from_utf8_lossy(&out.stderr), "panic: stack overflow (infinite recursion?)\n", "{name}");
+        }
+    }
+
     #[test]
     fn runtime_internals_are_hidden_from_programs() {
         let out = run_source("internal.ox", "fn main() {\n    print(__load64(0))\n    __rt_exit(3)\n}\n");

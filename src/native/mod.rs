@@ -114,6 +114,7 @@ pub fn generate(
         index_oob: None,
         switch: None,
         task_entry: None,
+        fault_entry: None,
         scopes: Vec::new(),
         regs: HashMap::new(),
         slots: 0,
@@ -215,6 +216,7 @@ pub fn generate(
     // arguments and the environment are.
     g.asm.store(R15, 1104, RSP);
     g.asm.mov(RBP, RSP);
+    g.call_runtime("__rt_watch_stack", 0);
     for item in &program.items {
         if let Item::Global(Stmt { kind: StmtKind::Let { name, init, .. }, .. }) = item {
             let offset = g.globals[name].0;
@@ -590,6 +592,8 @@ struct Gen<'a> {
     /// code every task starts in.
     switch: Option<Label>,
     task_entry: Option<Label>,
+    /// Where the kernel sends the program when it touches memory it may not.
+    fault_entry: Option<Label>,
 
     // ---- state of the function being compiled ----
     /// Local variables, innermost scope last.
@@ -869,6 +873,15 @@ impl<'a> Gen<'a> {
                 self.asm.pop(r);
             }
             self.asm.ret();
+            emitted = true;
+        }
+        if let Some(label) = self.fault_entry.filter(|l| !self.asm.is_bound(*l)) {
+            // The kernel calls this with a description of the fault in RSI;
+            // the address that was touched is 16 bytes into it.
+            self.asm.bind(label);
+            self.asm.load(RAX, RSI, 16);
+            self.asm.push(RAX);
+            self.call_runtime("__rt_fault", 0);
             emitted = true;
         }
         if let Some(label) = self.task_entry.filter(|l| !self.asm.is_bound(*l)) {
@@ -3739,6 +3752,12 @@ impl<'a> Gen<'a> {
                     self.switch = Some(self.asm.new_label());
                 }
                 self.asm.call(self.switch.unwrap());
+            }
+            "__fault_entry" => {
+                if self.fault_entry.is_none() {
+                    self.fault_entry = Some(self.asm.new_label());
+                }
+                self.asm.lea(RAX, self.fault_entry.unwrap());
             }
             "__task_entry" => {
                 if self.task_entry.is_none() {

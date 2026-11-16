@@ -3228,6 +3228,51 @@ fn __rt_sleep(ms: int) {
     }
 }
 
+// ---- running out of stack ----
+//
+// A function that calls itself without end fills the stack, and the next
+// thing it writes lands on memory the program may not touch. The kernel
+// then sends a signal; by default that kills the program without a word.
+// We ask to be called instead (on a small stack kept aside for that, since
+// the usual one is full) and say what happened.
+
+fn __rt_watch_stack() {
+    var spare = __rt_map(16384)
+    // sigaltstack: the stack to handle signals on (address, flags, size).
+    __store64(spare, spare + 64)
+    __store64(spare + 8, 0)
+    __store64(spare + 16, 16384 - 64)
+    __syscall(131, spare, 0, 0, 0, 0, 0)
+    // rt_sigaction for signal 11: the code to call, how (with details, on the
+    // spare stack), a way back that is never used, no signal held meanwhile.
+    __store64(spare + 24, __fault_entry())
+    __store64(spare + 32, 201326596)
+    __store64(spare + 40, __fault_entry())
+    __store64(spare + 48, 0)
+    __syscall(13, 11, spare + 24, 0, 8, 0, 0)
+}
+
+// The program touched memory at `address`, which it may not.
+fn __rt_fault(address: int) {
+    var state = __state()
+    // The stack of `main` lies below where the program started, the one of
+    // a task ends with a page that nothing may touch.
+    var top = __load64(state + __S_START)
+    var overflow = address < top && address > top - 1073741824
+    var task = __load64(state + __S_CURRENT)
+    if task != 0 && task != __load64(state + __S_MAIN) {
+        var stack = __load64(task + __T_STACK)
+        overflow = address >= stack - 4096 && address < stack + 8192
+    }
+    __rt_flush()
+    if overflow {
+        __rt_write(2, "panic: stack overflow (infinite recursion?)\n")
+    } else {
+        __rt_write(2, "fatal: invalid memory access (this is a bug in Onyx)\n")
+    }
+    __syscall(231, 2, 0, 0, 0, 0, 0)
+}
+
 // ---- tasks ----
 //
 // `fork` starts a task: a function that runs on a stack of its own. Tasks
@@ -3362,6 +3407,9 @@ fn __rt_fork(f: int) {
     var me = __rt_current()
     var task = __rt_alloc(64)
     var stack = __rt_map(__STACK)
+    // Its lowest page may not be touched (mprotect): a task that runs out
+    // of stack is stopped there instead of writing over something else.
+    __syscall(10, stack, 4096, 0, 0, 0, 0)
     // What `__switch` expects to find on a stack: seven saved registers,
     // then the address to go on at (here, the start of every task).
     var sp = stack + __STACK - 64

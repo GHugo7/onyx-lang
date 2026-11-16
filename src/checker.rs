@@ -178,7 +178,7 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "__call1" => (vec![Int, Int], Int, false, false),
         "__unwind" | "__yield" => (vec![], Void, false, false),
         "__switch" => (vec![Int, Int], Void, false, false),
-        "__task_entry" => (vec![], Int, false, false),
+        "__task_entry" | "__fault_entry" => (vec![], Int, false, false),
         "__bits" => (vec![Float], Int, false, false),
         "__float" => (vec![Int], Float, false, false),
         "__state" => (vec![], Int, false, false),

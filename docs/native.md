@@ -17,7 +17,7 @@ onyx build --target native hello.ox
 ./build/hello
 ```
 
-A hello-world executable is about 2.8 KB: only the functions a program
+A hello-world executable is about 3.4 KB: only the functions a program
 really uses, the runtime's included, end up in it.
 
 ## Status: experimental
@@ -60,9 +60,9 @@ so an unsupported feature in unused code does not get in the way.
 
 Known gaps in what is supported:
 
-- Infinite recursion ends with `killed by signal 11` instead of a clean
-  message. So does dropping a chain of objects nested hundreds of thousands
-  deep (a hand-made linked list, say), because they are released recursively.
+- Dropping a chain of objects nested hundreds of thousands deep (a
+  hand-made linked list, say) runs out of stack, because they are released
+  recursively; it is reported as a stack overflow.
 - Every list element takes 8 bytes, a `bool` included.
 - `upper` and `lower` know the letters of the Latin alphabet with their
   accents, Greek and Cyrillic. Letters of other alphabets are left as they
@@ -292,6 +292,16 @@ prints the same thing on both: it was compared on hundreds of generated
 programs.
 
 A program without `fork` contains none of this, and pays nothing for it.
+
+## Running out of stack
+
+Recursion without end is stopped with `panic: stack overflow (infinite
+recursion?)`, like on the JavaScript target. When the stack is full, the
+next write lands on memory that the program may not touch and the kernel
+sends it a signal; the runtime asked to be called in that case, on a small
+stack kept aside. The stack of `main` is the usual 8 MB of Linux, which is
+room for a recursion several hundred thousand calls deep; a task's stack
+ends with a page that nothing may touch.
 
 ## Tests
 
