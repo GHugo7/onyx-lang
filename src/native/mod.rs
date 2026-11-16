@@ -3932,6 +3932,7 @@ impl<'a> Gen<'a> {
             "ord" => self.call_rt("__rt_ord", &[Arg::Borrow(&args[0])], true),
             "chr" => self.call_rt("__rt_chr", &[Arg::Value(&args[0])], true),
             "bytes" => self.call_rt("__rt_bytes", &[Arg::Borrow(&args[0]), Arg::Descriptor(self.ty(e))], true),
+            "from_bytes" => self.call_rt("__rt_from_bytes", &[Arg::Borrow(&args[0])], true),
             "read_bytes" => {
                 self.call_rt_fallible("__rt_read_bytes", &[Arg::Borrow(&args[0]), Arg::Descriptor(self.ty(e))], true)
             }

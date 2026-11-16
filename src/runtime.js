@@ -151,6 +151,7 @@ const $rt = (() => {
       ? String.fromCodePoint(n)
       : panic("chr: " + n + " is not a character");
   const bytes = (s) => Array.from(new TextEncoder().encode(s));
+  const fromBytes = (list) => new TextDecoder().decode(Uint8Array.from(list));
 
   // ---- weak references ----
   // JavaScript frees objects with a garbage collector, which cycles do not
@@ -397,7 +398,7 @@ const $rt = (() => {
     OnyxError, Chan, CLOSED, panic, fail, str, fstr, print, idiv, imod, idx, setIdx, mapGet, eq,
     or, orAsync, pass, passAsync, caught, fork, sleep, run, runTests, expect, parseInt_, parseFloat_, readFile,
     writeFile, appendFile, fileExists, args, env, exit, input, fetch_, randomInt, list, strIdx,
-    repeat, replace, split, mapTryGet, weak, weakGet, noWeak, bitAnd, bitOr, bitXor, shiftLeft, shiftRight, bitNot, ord, chr, bytes,
+    repeat, replace, split, mapTryGet, weak, weakGet, noWeak, bitAnd, bitOr, bitXor, shiftLeft, shiftRight, bitNot, ord, chr, bytes, fromBytes,
     readBytes, writeBytes,
     setWriter: (w) => (write = w),
   };

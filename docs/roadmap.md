@@ -38,7 +38,8 @@ for what works today.
 9. **Tasks and channels** (done): `fork`, channels and `sleep`, with a
    scheduler written in Onyx. The native target now covers the whole
    language, except `fetch`.
-10. **Self-hosting**: the compiler rewritten in Onyx.
+10. **Self-hosting** (in progress): the compiler rewritten in Onyx, stage
+    by stage. See [the compiler in Onyx](selfhost.md).
 
 ## Later
 
@@ -47,6 +48,12 @@ for what works today.
 - **Web**: run `.ox` files in the browser, DOM bindings, an online playground.
 - **A game library** (`onyx.game`).
 - More systems for the native target: ARM64, Windows, macOS.
+
+## To do
+
+- **`fetch` on the native target, with HTTPS.** `fetch` only exists on the
+  JavaScript target today. Natively it means opening sockets, looking up
+  names (DNS) and, for HTTPS, an implementation of TLS written in Onyx.
 
 ## Language features under consideration
 

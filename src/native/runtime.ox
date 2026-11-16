@@ -3292,6 +3292,19 @@ fn __rt_bytes(s: string, td: int) -> int {
     return out
 }
 
+// The string made of these bytes.
+fn __rt_from_bytes(list: int) -> string {
+    var n = __load64(list + 8)
+    var data = __load64(list + 24)
+    var text = __rt_new_str(n)
+    var i = 0
+    while i < n {
+        __store8(text + 16 + i, __load64(data + i * 8))
+        i += 1
+    }
+    return __ptr_str(text)
+}
+
 fn __rt_read_bytes(path: string, td: int) -> int! {
     var text = __rt_read_file(path)?
     return __rt_bytes(text, td)

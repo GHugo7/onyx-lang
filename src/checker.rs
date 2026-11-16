@@ -182,6 +182,7 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "bit_not" | "ord" => (vec![if name == "ord" { Str } else { Int }], Int, false, false),
         "chr" => (vec![Int], Str, false, false),
         "bytes" => (vec![Str], List(Box::new(Int)), false, false),
+        "from_bytes" => (vec![List(Box::new(Int))], Str, false, false),
         "read_bytes" => (vec![Str], List(Box::new(Int)), true, false),
         "write_bytes" => (vec![Str, List(Box::new(Int))], Void, true, false),
         "pow" => (vec![Float, Float], Float, false, false),

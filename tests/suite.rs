@@ -158,6 +158,35 @@ fn test_files_are_found_and_run() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "2.4\n");
 }
 
+/// The compiler written in Onyx (compiler/) is checked stage by stage
+/// against the one written in Rust. Stage 1, the lexer: the same tokens for
+/// every Onyx file of the repository, the lexer itself included.
+#[test]
+fn onyx_lexer_agrees_with_the_rust_lexer() {
+    let exe = std::env::temp_dir().join(format!("onyx-selfhost-{}", std::process::id()));
+    let built = Command::new(ONYX).args(["build", "--target", "native", "compiler/main.ox", "-o"]).arg(&exe).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let mut files = Vec::new();
+    let mut dirs = vec![PathBuf::from("compiler"), PathBuf::from("examples"), PathBuf::from("tests"), PathBuf::from("benchmarks"), PathBuf::from("src")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "ox") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(files.len() > 100);
+    for file in files {
+        let expected = Command::new(ONYX).arg("tokens").arg(&file).output().unwrap();
+        let found = Command::new(&exe).arg("tokens").arg(&file).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&found.stdout), String::from_utf8_lossy(&expected.stdout), "{}", file.display());
+    }
+    let _ = std::fs::remove_file(&exe);
+}
+
 mod native {
     use super::*;
 

@@ -758,6 +758,7 @@ impl<'a> Gen<'a> {
                 };
                 format!("$rt.{function}({a})")
             }
+            "from_bytes" => format!("$rt.fromBytes({a})"),
             "read_bytes" => format!("$rt.readBytes({a})"),
             "write_bytes" => format!("$rt.writeBytes({a})"),
             // What `match` is rewritten with (see desugar.rs).

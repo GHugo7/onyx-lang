@@ -88,6 +88,8 @@ Known gaps in what is supported:
 - A task has a stack of 256 KB.
 - A file is read as it is: bytes that are not valid UTF-8 are kept, where
   the JavaScript target replaces them.
+- A `catch` block cannot end with another `catch` as its value; give the
+  inner one a variable of its own.
 - Adding or removing keys of a map inside a `for` loop over that same map
   is not specified: the two targets may visit different keys afterwards.
 - Only Linux on x86-64 is supported.

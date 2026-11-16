@@ -64,12 +64,62 @@ fn main() {
             compile(&file, false, target);
             println!("ok: {} has no errors", file.display());
         }
+        // For the compiler written in Onyx (see compiler/): what the lexer
+        // makes of a file, in a form that the two can be compared on.
+        "tokens" => dump_tokens(&source_arg(rest)),
         "explain" => explain(rest),
         "version" | "--version" | "-V" => println!("onyx {VERSION}"),
         "help" | "--help" | "-h" => println!("{USAGE}"),
         other if other.ends_with(".ox") => run(&args, false),
         other => die(&format!("unknown command `{other}`\n\n{USAGE}")),
     }
+}
+
+fn dump_tokens(path: &Path) {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("cannot read `{}`: {e}", path.display())));
+    let quote = |s: &str| {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\t' => out.push_str("\\t"),
+                '\r' => out.push_str("\\r"),
+                '\0' => out.push_str("\\0"),
+                other => out.push(other),
+            }
+        }
+        out.push('"');
+        out
+    };
+    let mut out = String::new();
+    match lexer::lex(&text, 0, text.len()) {
+        Ok(tokens) => {
+            for t in tokens {
+                let debug = format!("{:?}", t.tok);
+                let name = debug.split(['(', ' ']).next().unwrap_or_default();
+                out.push_str(&format!("{} {} {} {name}", t.span.start, t.span.end, t.nl_before as u8));
+                match &t.tok {
+                    lexer::Tok::Int(n) => out.push_str(&format!(" {n}")),
+                    lexer::Tok::Float(_) => out.push_str(&format!(" {}", &text[t.span.start..t.span.end])),
+                    lexer::Tok::Ident(word) => out.push_str(&format!(" {word}")),
+                    lexer::Tok::Str(pieces) => {
+                        for piece in pieces {
+                            match piece {
+                                lexer::StrPiece::Lit(s) => out.push_str(&format!(" L{}", quote(s))),
+                                lexer::StrPiece::Code { start, end } => out.push_str(&format!(" C{start}:{end}")),
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                out.push('\n');
+            }
+        }
+        Err(d) => out.push_str(&format!("error {} {} {} {}\n", d.code, d.span.start, d.span.end, d.message)),
+    }
+    print!("{out}");
 }
 
 fn die(message: &str) -> ! {
