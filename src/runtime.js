@@ -136,6 +136,22 @@ const $rt = (() => {
     through(e);
   };
 
+  // ---- bits and bytes ----
+  // An int is 64 bits wide; JavaScript's own operators only know 32.
+  const wide = (f) => (a, b) => Number(BigInt.asIntN(64, f(BigInt(a), BigInt(b))));
+  const bitAnd = wide((a, b) => a & b);
+  const bitOr = wide((a, b) => a | b);
+  const bitXor = wide((a, b) => a ^ b);
+  const shiftLeft = wide((a, n) => a << (n & 63n));
+  const shiftRight = wide((a, n) => a >> (n & 63n));
+  const bitNot = (a) => -a - 1;
+  const ord = (s) => (s.length === 0 ? panic("ord of an empty string") : s.codePointAt(0));
+  const chr = (n) =>
+    Number.isInteger(n) && n >= 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff)
+      ? String.fromCodePoint(n)
+      : panic("chr: " + n + " is not a character");
+  const bytes = (s) => Array.from(new TextEncoder().encode(s));
+
   // ---- weak references ----
   // JavaScript frees objects with a garbage collector, which cycles do not
   // trouble: here a weak reference simply holds its object, and `get`
@@ -293,6 +309,8 @@ const $rt = (() => {
   };
   const readFile = (path) => fsCall("read", path, (fs) => fs.readFileSync(path, "utf8"));
   const writeFile = (path, text) => fsCall("write", path, (fs) => void fs.writeFileSync(path, text));
+  const readBytes = (path) => fsCall("read", path, (fs) => Array.from(fs.readFileSync(path)));
+  const writeBytes = (path, list) => fsCall("write", path, (fs) => void fs.writeFileSync(path, Buffer.from(list)));
   const appendFile = (path, text) => fsCall("write", path, (fs) => void fs.appendFileSync(path, text));
   const fileExists = (path) => isNode && require("node:fs").existsSync(path);
   const args = () => (isNode ? process.argv.slice(2) : []);
@@ -379,7 +397,8 @@ const $rt = (() => {
     OnyxError, Chan, CLOSED, panic, fail, str, fstr, print, idiv, imod, idx, setIdx, mapGet, eq,
     or, orAsync, pass, passAsync, caught, fork, sleep, run, runTests, expect, parseInt_, parseFloat_, readFile,
     writeFile, appendFile, fileExists, args, env, exit, input, fetch_, randomInt, list, strIdx,
-    repeat, replace, split, mapTryGet, weak, weakGet, noWeak,
+    repeat, replace, split, mapTryGet, weak, weakGet, noWeak, bitAnd, bitOr, bitXor, shiftLeft, shiftRight, bitNot, ord, chr, bytes,
+    readBytes, writeBytes,
     setWriter: (w) => (write = w),
   };
 })();

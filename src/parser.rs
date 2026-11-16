@@ -356,6 +356,17 @@ impl<'a> Parser<'a> {
 
     // ---- types ----
 
+    /// The `>` that ends `chan<...>`, `map<...>` or `weak<...>`. In
+    /// `chan<chan<int>>` the lexer saw `>>` as one token: it closes two.
+    fn close_angle(&mut self) -> PResult<()> {
+        if self.peek() == &Tok::Shr {
+            self.toks[self.pos].tok = Tok::Gt;
+            return Ok(());
+        }
+        self.expect(Tok::Gt, "`>`")?;
+        Ok(())
+    }
+
     fn type_expr(&mut self) -> PResult<TypeExpr> {
         let start = self.span();
         match self.peek().clone() {
@@ -369,7 +380,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(Tok::Lt, "`<` (channel types look like `chan<int>`)")?;
                 let elem = self.type_expr()?;
-                self.expect(Tok::Gt, "`>`")?;
+                self.close_angle()?;
                 Ok(TypeExpr { kind: TypeKind::Chan(Box::new(elem)), span: start.to(self.prev_span()) })
             }
             Tok::Fn => {
@@ -396,7 +407,7 @@ impl<'a> Parser<'a> {
                     let key = self.type_expr()?;
                     self.expect(Tok::Comma, "`,` (map types look like `map<string, int>`)")?;
                     let value = self.type_expr()?;
-                    self.expect(Tok::Gt, "`>`")?;
+                    self.close_angle()?;
                     return Ok(TypeExpr {
                         kind: TypeKind::Map(Box::new(key), Box::new(value)),
                         span: start.to(self.prev_span()),
@@ -405,7 +416,7 @@ impl<'a> Parser<'a> {
                 if name == "weak" && self.peek() == &Tok::Lt {
                     self.advance();
                     let target = self.type_expr()?;
-                    self.expect(Tok::Gt, "`>`")?;
+                    self.close_angle()?;
                     return Ok(TypeExpr { kind: TypeKind::Weak(Box::new(target)), span: start.to(self.prev_span()) });
                 }
                 // `module.Type`
@@ -623,6 +634,26 @@ impl<'a> Parser<'a> {
                 Tok::Star => (BinOp::Mul, 6),
                 Tok::Slash => (BinOp::Div, 6),
                 Tok::Percent => (BinOp::Mod, 6),
+                // Operations on the bits of an int are calls to built-in
+                // functions: `a & b` is `bit_and(a, b)`.
+                Tok::Pipe | Tok::Caret | Tok::Amp | Tok::Shl | Tok::Shr => {
+                    let (function, prec) = match self.peek() {
+                        Tok::Pipe => ("bit_or", 5),
+                        Tok::Caret => ("bit_xor", 5),
+                        Tok::Amp => ("bit_and", 6),
+                        Tok::Shl => ("shift_left", 6),
+                        _ => ("shift_right", 6),
+                    };
+                    if prec < min_prec {
+                        break;
+                    }
+                    let at = self.advance().span;
+                    let rhs = self.binary(prec + 1)?;
+                    let span = lhs.span.to(rhs.span);
+                    let callee = self.mk(ExprKind::Ident(function.to_string()), at);
+                    lhs = self.mk(ExprKind::Call { callee: Box::new(callee), args: vec![lhs, rhs] }, span);
+                    continue;
+                }
                 _ => break,
             };
             if prec < min_prec {
@@ -656,6 +687,13 @@ impl<'a> Parser<'a> {
                 let e = self.unary()?;
                 let span = start.to(e.span);
                 Ok(self.mk(ExprKind::Recv(Box::new(e)), span))
+            }
+            Tok::Tilde => {
+                self.advance();
+                let e = self.unary()?;
+                let span = start.to(e.span);
+                let callee = self.mk(ExprKind::Ident("bit_not".to_string()), start);
+                Ok(self.mk(ExprKind::Call { callee: Box::new(callee), args: vec![e] }, span))
             }
             _ => self.postfix(),
         }
@@ -818,7 +856,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.expect(Tok::Lt, "`<` (create a channel with `chan<int>()`)")?;
                 let elem = self.type_expr()?;
-                self.expect(Tok::Gt, "`>`")?;
+                self.close_angle()?;
                 self.expect(Tok::LParen, "`(` (create a channel with `chan<int>()`)")?;
                 let cap = if self.peek() != &Tok::RParen {
                     Some(Box::new(self.with_no_struct(false, |p| p.expr())?))

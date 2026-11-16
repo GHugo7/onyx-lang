@@ -178,6 +178,12 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "expect" => (vec![Bool], Void, false, false),
         "panic" => (vec![Str], Void, false, false),
         "sqrt" => (vec![Float], Float, false, false),
+        "bit_and" | "bit_or" | "bit_xor" | "shift_left" | "shift_right" => (vec![Int, Int], Int, false, false),
+        "bit_not" | "ord" => (vec![if name == "ord" { Str } else { Int }], Int, false, false),
+        "chr" => (vec![Int], Str, false, false),
+        "bytes" => (vec![Str], List(Box::new(Int)), false, false),
+        "read_bytes" => (vec![Str], List(Box::new(Int)), true, false),
+        "write_bytes" => (vec![Str, List(Box::new(Int))], Void, true, false),
         "pow" => (vec![Float, Float], Float, false, false),
         "floor" | "ceil" | "round" => (vec![Float], Int, false, false),
         // Low-level operations of the native runtime (see src/native/runtime.ox).

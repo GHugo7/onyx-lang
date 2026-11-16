@@ -746,6 +746,20 @@ impl<'a> Gen<'a> {
             "now" => "Date.now()".to_string(),
             "random" => "Math.random()".to_string(),
             "random_int" => format!("$rt.randomInt({a})"),
+            "bit_and" | "bit_or" | "bit_xor" | "shift_left" | "shift_right" | "bit_not" | "ord" | "chr" | "bytes" => {
+                let function = match name {
+                    "bit_and" => "bitAnd",
+                    "bit_or" => "bitOr",
+                    "bit_xor" => "bitXor",
+                    "shift_left" => "shiftLeft",
+                    "shift_right" => "shiftRight",
+                    "bit_not" => "bitNot",
+                    other => other,
+                };
+                format!("$rt.{function}({a})")
+            }
+            "read_bytes" => format!("$rt.readBytes({a})"),
+            "write_bytes" => format!("$rt.writeBytes({a})"),
             // What `match` is rewritten with (see desugar.rs).
             "__tag" => format!("{a}.v"),
             "__field" => {

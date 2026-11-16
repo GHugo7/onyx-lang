@@ -2533,6 +2533,7 @@ impl<'a> Gen<'a> {
                     Some(CallKind::Builtin(name)) => matches!(
                         name.as_str(),
                         "str" | "abs" | "min" | "max" | "float" | "int" | "sqrt" | "pow" | "floor" | "ceil" | "round"
+                            | "bit_and" | "bit_or" | "bit_xor" | "bit_not" | "shift_left" | "shift_right"
                     ),
                     // Strings never change: all their methods only read them.
                     Some(CallKind::BuiltinMethod(Recv::Str, _)) => true,
@@ -3924,7 +3925,20 @@ impl<'a> Gen<'a> {
                 self.asm.mov(RSI, RAX);
                 self.asm.mov(RDI, RDX);
             }
-            "__and" => {
+            "bit_not" => {
+                self.expr(&args[0]);
+                self.asm.alu_imm(Alu::Xor, RAX, -1);
+            }
+            "ord" => self.call_rt("__rt_ord", &[Arg::Borrow(&args[0])], true),
+            "chr" => self.call_rt("__rt_chr", &[Arg::Value(&args[0])], true),
+            "bytes" => self.call_rt("__rt_bytes", &[Arg::Borrow(&args[0]), Arg::Descriptor(self.ty(e))], true),
+            "read_bytes" => {
+                self.call_rt_fallible("__rt_read_bytes", &[Arg::Borrow(&args[0]), Arg::Descriptor(self.ty(e))], true)
+            }
+            "write_bytes" => {
+                self.call_rt_fallible("__rt_write_bytes", &[Arg::Borrow(&args[0]), Arg::Borrow(&args[1])], false)
+            }
+            "__and" | "bit_and" => {
                 self.expr(&args[0]);
                 match self.simple(&args[1]) {
                     Some(operand) => self.operand_alu(Alu::And, RAX, operand),
@@ -3936,17 +3950,17 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
-            "__or" | "__xor" => {
-                let alu = if name == "__or" { Alu::Or } else { Alu::Xor };
+            "__or" | "__xor" | "bit_or" | "bit_xor" => {
+                let alu = if name.ends_with("_or") { Alu::Or } else { Alu::Xor };
                 self.expr(&args[0]);
                 self.asm.push(RAX);
                 self.expr(&args[1]);
                 self.asm.pop(RCX);
                 self.asm.alu(alu, RAX, RCX);
             }
-            "__shl" | "__shr" | "__sar" => {
+            "__shl" | "__shr" | "__sar" | "shift_left" | "shift_right" => {
                 let kind = match name {
-                    "__shl" => Shift::Left,
+                    "__shl" | "shift_left" => Shift::Left,
                     "__shr" => Shift::Right,
                     _ => Shift::RightSigned,
                 };

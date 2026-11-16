@@ -23,6 +23,24 @@ means the call can fail and must be handled with `?`, `or` or `catch`.
 | `parse_int(s: string) -> int!` | Fails when `s` is not a whole number |
 | `parse_float(s: string) -> float!` | Fails when `s` is not a number |
 
+## Bits and bytes
+
+| Operation | Description |
+| --- | --- |
+| `a & b`, `a \| b`, `a ^ b` | Bit by bit: and, or, exclusive or |
+| `~a` | Every bit flipped |
+| `a << n`, `a >> n` | Bits moved left or right by `n` places (`>>` keeps the sign) |
+| `ord(s: string) -> int` | The number of the first character: `ord("A")` is 65 |
+| `chr(n: int) -> string` | The character with that number |
+| `bytes(s: string) -> [int]` | The bytes of the string (UTF-8) |
+| `read_bytes(path: string) -> [int]!` | The bytes of a file |
+| `write_bytes(path: string, data: [int]) -> void!` | Writes one byte per number |
+
+An `int` has 64 bits. `&`, `<<` and `>>` bind like `*`; `|` and `^` like
+`+`: `a | 1 << 4` is `a | (1 << 4)`, and comparisons come after all of them.
+The operators are also functions: `bit_and`, `bit_or`, `bit_xor`, `bit_not`,
+`shift_left`, `shift_right`.
+
 ## Math
 
 | Function | Description |

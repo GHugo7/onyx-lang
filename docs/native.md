@@ -43,6 +43,8 @@ The native target is being built up step by step. It currently supports:
 - `var`, assignment, `if` / `else`, `while`, `for i in a..b`, `break`,
   `continue`, `return`
 - arithmetic, comparisons, `&&`, `||`, `!`
+- operations on bits (`&`, `|`, `^`, `~`, `<<`, `>>`), `ord`, `chr`, `bytes`,
+  `read_bytes`, `write_bytes`
 - floats: arithmetic and `%`, automatic conversion from `int`, `float`,
   `int`, `sqrt`, `pow`, `floor`, `ceil`, `round`, `abs`, `min`, `max`,
   `parse_float`, `random`, `random_int`

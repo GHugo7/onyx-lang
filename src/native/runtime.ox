@@ -3212,6 +3212,105 @@ fn __rt_file_exists(path: string) -> bool {
     return found
 }
 
+// ---- characters as numbers, strings as bytes ----
+
+// The number (code point) of the first character of `s`.
+fn __rt_ord(s: string) -> int {
+    var p = __str_ptr(s)
+    var n = __load32(p + 8)
+    if n == 0 {
+        __rt_panic("ord of an empty string")
+    }
+    var lead = __load8(p + 16)
+    var size = __rt_char_size(lead)
+    if size == 1 || size > n {
+        return lead
+    }
+    // The first byte gives the upper bits, each following one six more.
+    var code = lead - 192
+    if size == 3 {
+        code = lead - 224
+    } else if size == 4 {
+        code = lead - 240
+    }
+    var i = 1
+    while i < size {
+        code = code * 64 + __load8(p + 16 + i) - 128
+        i += 1
+    }
+    return code
+}
+
+// The character whose number is `code`, as a string.
+fn __rt_chr(code: int) -> string {
+    if code < 0 || code > 1114111 || (code >= 55296 && code <= 57343) {
+        __rt_panic("chr: " + __rt_int_str(code) + " is not a character")
+    }
+    var size = 1
+    if code >= 65536 {
+        size = 4
+    } else if code >= 2048 {
+        size = 3
+    } else if code >= 128 {
+        size = 2
+    }
+    var s = __rt_new_str(size)
+    if size == 1 {
+        __store8(s + 16, code)
+    } else {
+        // Filled from the end: six bits per byte, the rest in the first one.
+        var rest = code
+        var i = size - 1
+        while i > 0 {
+            __store8(s + 16 + i, 128 + rest % 64)
+            rest = rest / 64
+            i -= 1
+        }
+        var mark = 192
+        if size == 3 {
+            mark = 224
+        } else if size == 4 {
+            mark = 240
+        }
+        __store8(s + 16, mark + rest)
+    }
+    return __ptr_str(s)
+}
+
+// The bytes of `s` (its UTF-8 form), as a list of numbers.
+fn __rt_bytes(s: string, td: int) -> int {
+    var p = __str_ptr(s)
+    var n = __load32(p + 8)
+    var out = __rt_list_new(td, n)
+    var data = __load64(out + 24)
+    var i = 0
+    while i < n {
+        __store64(data + i * 8, __load8(p + 16 + i))
+        i += 1
+    }
+    __store64(out + 8, n)
+    return out
+}
+
+fn __rt_read_bytes(path: string, td: int) -> int! {
+    var text = __rt_read_file(path)?
+    return __rt_bytes(text, td)
+}
+
+// Writes the numbers of `list`, one byte each, to the file.
+fn __rt_write_bytes(path: string, list: int) -> void! {
+    var n = __load64(list + 8)
+    var data = __load64(list + 24)
+    var text = __rt_new_str(n)
+    var i = 0
+    while i < n {
+        __store8(text + 16 + i, __load64(data + i * 8))
+        i += 1
+    }
+    var held = __ptr_str(text)
+    __rt_write_file(path, held, 577)?
+}
+
 // The next byte of standard input, or -1 at its end. Input is read 4096
 // bytes at a time.
 fn __rt_in_byte() -> int {
