@@ -717,6 +717,8 @@ impl<'a> Gen<'a> {
             "now" => "Date.now()".to_string(),
             "random" => "Math.random()".to_string(),
             "random_int" => format!("$rt.randomInt({a})"),
+            "weak" if args.is_empty() => "$rt.noWeak".to_string(),
+            "weak" => format!("$rt.weak({a})"),
             "input" => format!("$rt.input({a})"),
             "fetch" => self.await_(format!("$rt.fetch_({a})")),
             "panic" => format!("$rt.panic({a})"),
@@ -759,6 +761,7 @@ impl<'a> Gen<'a> {
             (Recv::Map, "clear") => format!("{o}.clear()"),
 
             (Recv::Chan, "close") => format!("{o}.close()"),
+            (Recv::Weak, "get") => format!("$rt.weakGet({o})"),
             _ => format!("$rt.panic(\"unknown method {name}\")"),
         }
     }

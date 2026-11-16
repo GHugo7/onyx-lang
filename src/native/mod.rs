@@ -304,7 +304,7 @@ pub fn generate(
 fn is_ref(ty: &Type) -> bool {
     matches!(
         ty,
-        Type::Str | Type::Error | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Interface(_) | Type::Fn(_) | Type::Chan(_)
+        Type::Str | Type::Error | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Interface(_) | Type::Fn(_) | Type::Chan(_) | Type::Weak(_)
     )
 }
 
@@ -313,7 +313,7 @@ fn supported(ty: &Type) -> bool {
         Type::Int | Type::Float | Type::Bool | Type::Str | Type::Error | Type::Void | Type::Range | Type::Unknown => true,
         Type::Struct(_) | Type::Interface(_) => true,
         Type::Fn(sig) => sig.params.iter().all(supported) && supported(&sig.ret),
-        Type::List(elem) | Type::Chan(elem) => supported(elem),
+        Type::List(elem) | Type::Chan(elem) | Type::Weak(elem) => supported(elem),
         Type::Map(key, value) => **key != Type::Float && supported(key) && supported(value),
     }
 }
@@ -759,6 +759,9 @@ impl<'a> Gen<'a> {
                 }
                 other => {
                     let kind = match other {
+                        // A weak reference: a cell that holds the address
+                        // of its object, or 0 once the object is gone.
+                        Type::Weak(_) => 11,
                         Type::Bool => 1,
                         Type::Float => 2,
                         Type::Str => 3,
@@ -2895,6 +2898,10 @@ impl<'a> Gen<'a> {
                 let ExprKind::Field { obj, .. } = &callee.kind else { return };
                 self.map_method(e, obj, &name, args);
             }
+            Some(CallKind::BuiltinMethod(Recv::Weak, name)) if name == "get" => {
+                let ExprKind::Field { obj, .. } = &callee.kind else { return };
+                self.call_rt_fallible("__rt_weak_get", &[Arg::Borrow(obj)], true);
+            }
             Some(CallKind::BuiltinMethod(Recv::Chan, name)) if name == "close" => {
                 let ExprKind::Field { obj, .. } = &callee.kind else { return };
                 let owned = [self.push_arg(obj)];
@@ -3560,6 +3567,11 @@ impl<'a> Gen<'a> {
             "now" => self.call_rt("__rt_now", &[], true),
             "sleep" if self.an.has_forks => self.call_rt("__rt_task_sleep", &[Arg::Value(&args[0])], false),
             "sleep" => self.call_rt("__rt_sleep", &[Arg::Value(&args[0])], false),
+            "weak" if args.is_empty() => self.call_rt("__rt_weak_none", &[Arg::Descriptor(self.ty(e))], true),
+            "weak" => {
+                let table = Type::Map(Box::new(Type::Int), Box::new(Type::Int));
+                self.call_rt("__rt_weak", &[Arg::Borrow(&args[0]), Arg::Descriptor(self.ty(e)), Arg::Descriptor(table)], true);
+            }
             "__fork" => {
                 // The closure belongs to the new task from here on.
                 self.expr(&args[0]);

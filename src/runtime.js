@@ -40,6 +40,7 @@ const $rt = (() => {
     }
     if (v instanceof OnyxError) return v.message;
     if (v instanceof Chan) return "chan";
+    if (v instanceof Weak) return "weak";
     if (typeof v === "function") return "fn";
     if (v === undefined) return "void";
     const floats = v.constructor.$floats;
@@ -72,7 +73,7 @@ const $rt = (() => {
       for (const [k, v] of a) if (!b.has(k) || !eq(v, b.get(k))) return false;
       return true;
     }
-    if (a instanceof Chan || a.constructor !== b.constructor) return false;
+    if (a instanceof Chan || a instanceof Weak || a.constructor !== b.constructor) return false;
     return Object.keys(a).every((k) => eq(a[k], b[k]));
   };
 
@@ -127,6 +128,24 @@ const $rt = (() => {
     if (e instanceof OnyxError) return e;
     through(e);
   };
+
+  // ---- weak references ----
+  // JavaScript frees objects with a garbage collector, which cycles do not
+  // trouble: here a weak reference simply holds its object, and `get`
+  // never fails. One reference per object, so that two of them are equal.
+  class Weak {
+    constructor(target) {
+      this.target = target;
+    }
+  }
+  const weakRefs = new WeakMap();
+  const weak = (target) => {
+    let ref = weakRefs.get(target);
+    if (!ref) weakRefs.set(target, (ref = new Weak(target)));
+    return ref;
+  };
+  const noWeak = new Weak(undefined);
+  const weakGet = (ref) => (ref.target === undefined ? fail("the object is gone") : ref.target);
 
   // ---- concurrency ----
   class Chan {
@@ -353,7 +372,7 @@ const $rt = (() => {
     OnyxError, Chan, CLOSED, panic, fail, str, fstr, print, idiv, imod, idx, setIdx, mapGet, eq,
     or, orAsync, pass, passAsync, caught, fork, sleep, run, runTests, expect, parseInt_, parseFloat_, readFile,
     writeFile, appendFile, fileExists, args, env, exit, input, fetch_, randomInt, list, strIdx,
-    repeat, replace, split, mapTryGet,
+    repeat, replace, split, mapTryGet, weak, weakGet, noWeak,
     setWriter: (w) => (write = w),
   };
 })();

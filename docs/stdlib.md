@@ -104,6 +104,17 @@ Positions and lengths count characters, not bytes: `"été".len()` is 3.
 | `remove(key: K)`, `clear()` | |
 | `keys() -> [K]`, `values() -> [V]` | In insertion order |
 
+## weak<T>
+
+A reference that does not keep its object (a struct, a list, a map) alive.
+See [the native target](native.md#memory).
+
+| Operation | Description |
+| --- | --- |
+| `weak(object)` | A weak reference to `object` |
+| `weak()` | An empty one; its type comes from where it is used |
+| `get() -> T!` | The object; fails when it is gone |
+
 ## chan<T>
 
 | Operation | Description |

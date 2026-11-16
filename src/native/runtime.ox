@@ -81,6 +81,7 @@ const __S_READY = 1200     // first task waiting for its turn, and at +8 the las
 const __S_TIMERS = 1216    // sleeping tasks, the first to wake up first
 const __S_ZOMBIE = 1224    // a finished task whose stack is still to be given back
 const __S_MAIN_DONE = 1232 // `main` has returned
+const __S_WEAK = 1256      // the table of weak references: object -> cell (0 while there are none)
 const __S_CHAN_OK = 1240   // whether the last receive got a value (0: the channel was closed)
 
 const __SMALL = 1024       // blocks up to this size come from chunks
@@ -198,7 +199,13 @@ fn __rt_destroy(p: int) {
     var td = __load32(p + 4)
     var kind = __load64(td)
     var size = 0
-    if kind == __KIND_STRING {
+    if __load64(__state() + __S_WEAK) != 0 {
+        // Weak references to this object, if any, must not find it any more.
+        __rt_weak_forget(p, kind)
+    }
+    if kind == 11 {
+        size = 16
+    } else if kind == __KIND_STRING {
         size = 16 + __load32(p + 12)
     } else if kind == __KIND_LIST {
         var data = __load64(p + 24)
@@ -2154,6 +2161,9 @@ fn __rt_repr(v: int, td: int, quoted: bool) -> string {
     if kind == 10 {
         return "chan"
     }
+    if kind == 11 {
+        return "weak"
+    }
     if kind == __KIND_LIST {
         var elem = __load64(td + 8)
         var count = __load64(v + 8)
@@ -2217,7 +2227,7 @@ fn __rt_eq(a: int, b: int, td: int) -> bool {
         // Not the same as equal bits: 0.0 equals -0.0, and NaN equals nothing.
         return __float(a) == __float(b)
     }
-    if kind < 3 || kind == 10 || a == b {
+    if kind < 3 || kind >= 10 || a == b {
         return a == b
     }
     if kind == __KIND_STRING {
@@ -3271,6 +3281,81 @@ fn __rt_fault(address: int) {
         __rt_write(2, "fatal: invalid memory access (this is a bug in Onyx)\n")
     }
     __syscall(231, 2, 0, 0, 0, 0, 0)
+}
+
+// ---- weak references ----
+//
+// A weak reference points to an object without counting as one of its
+// references: the object is freed as if it were not there, and the weak
+// reference then says so. That is what breaks a cycle: a child that points
+// back to its parent weakly does not keep the parent alive.
+//
+// A weak reference is a cell of 16 bytes holding the address of its object,
+// or 0 once the object is gone. There is one cell per object, shared by all
+// the weak references to it, and a table (a map from object to cell) to
+// find it: when an object is freed and the table is not empty, its cell is
+// looked up and emptied.
+
+fn __rt_weak(target: int, td: int, table_td: int) -> int {
+    var state = __state()
+    var table = __load64(state + __S_WEAK)
+    if table == 0 {
+        table = __rt_map_new(table_td)
+        __store64(state + __S_WEAK, table)
+    }
+    var entry = __rt_map_entry(table, target)
+    if entry != 0 {
+        var known = __load64(entry + 16)
+        __rt_retain(known)
+        return known
+    }
+    var cell = __rt_new(td, 16)
+    __store64(cell + 8, target)
+    __rt_map_set(table, target, cell)
+    return cell
+}
+
+// `weak()`: a weak reference to nothing.
+fn __rt_weak_none(td: int) -> int {
+    var cell = __rt_new(td, 16)
+    __store64(cell + 8, 0)
+    return cell
+}
+
+// `w.get()`: the object, or a failure if it is gone.
+fn __rt_weak_get(cell: int) -> int! {
+    var target = __load64(cell + 8)
+    if target == 0 {
+        fail "the object is gone"
+    }
+    __rt_retain(target)
+    return target
+}
+
+// Called for every object that is freed while weak references exist.
+fn __rt_weak_forget(p: int, kind: int) {
+    var state = __state()
+    var table = __load64(state + __S_WEAK)
+    if kind == 11 {
+        // A cell goes away: nobody refers weakly to its object any more.
+        var target = __load64(p + 8)
+        if target == 0 {
+            return
+        }
+        __rt_map_remove(table, target)
+    } else {
+        var entry = __rt_map_entry(table, p)
+        if entry == 0 {
+            return
+        }
+        __store64(__load64(entry + 16) + 8, 0)
+        __rt_map_remove(table, p)
+    }
+    if __load64(table + 8) == 0 {
+        // The table is only kept while it is of use.
+        __store64(state + __S_WEAK, 0)
+        __rt_release(table)
+    }
 }
 
 // ---- tasks ----

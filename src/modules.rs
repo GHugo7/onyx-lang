@@ -276,7 +276,7 @@ impl<'a> Resolver<'a> {
     fn type_expr(&mut self, t: &mut TypeExpr) {
         match &mut t.kind {
             TypeKind::Named(name) => self.type_name(name, t.span),
-            TypeKind::List(elem) | TypeKind::Chan(elem) => self.type_expr(elem),
+            TypeKind::List(elem) | TypeKind::Chan(elem) | TypeKind::Weak(elem) => self.type_expr(elem),
             TypeKind::Map(k, v) => {
                 self.type_expr(k);
                 self.type_expr(v);

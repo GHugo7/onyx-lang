@@ -35,6 +35,7 @@ The native target is being built up step by step. It currently supports:
 - error handling: functions that return `T!`, `fail`, `?`, `or`, `catch`,
   the `error` type, and a `main` that can fail
 - functions, recursion, any number of parameters
+- weak references (`weak<T>`)
 - lambdas and closures, functions as values (in variables, fields, lists,
   maps), and the list methods `map`, `filter` and `sort_by`
 - top-level `var` and `const`
@@ -137,9 +138,35 @@ A closure can be part of such a cycle too: a lambda stored in a variable
 that it uses itself, or in a field of an object it captures, keeps itself
 alive.
 
-A way to mark one of the links as weak is planned. Until then, avoid such
-structures in long-running programs, or break the cycle by hand before
-dropping it (`a.friends.clear()`).
+The way out is to make one of the links weak. A `weak<T>` points to an
+object without counting as one of its references:
+
+```onyx
+struct Node {
+    name: string
+    parent: weak<Node>
+    children: [Node]
+}
+
+fn main() {
+    var root = Node{name: "root", parent: weak(), children: []}
+    var child = Node{name: "child", parent: weak(root), children: []}
+    root.children.push(child)        // root -> child, and child - - > root
+    var up = child.parent.get() catch err {
+        return
+    }
+    print(up.name)
+}
+```
+
+`weak(object)` makes one, `weak()` makes an empty one, and `get()` gives the
+object back, or fails with `the object is gone` if it has been freed. Here
+the parents own their children and the children only look at their parent:
+when `root` goes away, the whole tree is freed.
+
+On the JavaScript target a garbage collector frees memory, cycles
+included: there a weak reference simply holds its object, and `get` only
+fails on an empty one. A program should not count on `get` failing.
 
 To verify that a program frees everything, run it with the leak check:
 
@@ -336,8 +363,7 @@ They were compared with Node.js on tens of thousands of random floats.
 
 ## Roadmap for this target
 
-1. Weak references, to break cycles
-2. Float variables in registers
-3. `fetch`
-4. Tasks on several threads
-5. Other systems (ARM64, Windows, macOS)
+1. Float variables in registers
+2. `fetch`
+3. Tasks on several threads
+4. Other systems (ARM64, Windows, macOS)

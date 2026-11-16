@@ -81,6 +81,8 @@ pub enum TypeKind {
     List(Box<TypeExpr>),
     Map(Box<TypeExpr>, Box<TypeExpr>),
     Chan(Box<TypeExpr>),
+    /// `weak<T>`
+    Weak(Box<TypeExpr>),
     Fn { params: Vec<TypeExpr>, ret: Option<Box<TypeExpr>>, fallible: bool },
 }
 

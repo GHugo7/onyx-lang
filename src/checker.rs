@@ -18,6 +18,8 @@ pub enum Type {
     List(Box<Type>),
     Map(Box<Type>, Box<Type>),
     Chan(Box<Type>),
+    /// A reference that does not keep its object alive.
+    Weak(Box<Type>),
     Struct(String),
     Interface(String),
     Fn(Rc<FnSig>),
@@ -45,6 +47,7 @@ impl fmt::Display for Type {
             Type::List(t) => write!(f, "[{t}]"),
             Type::Map(k, v) => write!(f, "map<{k}, {v}>"),
             Type::Chan(t) => write!(f, "chan<{t}>"),
+            Type::Weak(t) => write!(f, "weak<{t}>"),
             Type::Struct(n) | Type::Interface(n) => write!(f, "{n}"),
             Type::Fn(sig) => {
                 write!(f, "fn(")?;
@@ -95,6 +98,7 @@ pub enum Recv {
     List,
     Map,
     Chan,
+    Weak,
 }
 
 /// What a call expression resolves to.
@@ -191,7 +195,7 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
 
 pub fn is_builtin(name: &str) -> bool {
     builtin_sig(name).is_some()
-        || matches!(name, "print" | "str" | "int" | "float" | "abs" | "min" | "max")
+        || matches!(name, "print" | "str" | "int" | "float" | "abs" | "min" | "max" | "weak")
 }
 
 const BUILTIN_TYPES: &[&str] = &["int", "float", "bool", "string", "void", "error", "map"];
@@ -634,11 +638,23 @@ impl<'a> Checker<'a> {
                 Type::Map(Box::new(key), Box::new(self.resolve(v)))
             }
             TypeKind::Chan(elem) => Type::Chan(Box::new(self.resolve(elem))),
+            TypeKind::Weak(target) => {
+                let ty = self.resolve(target);
+                self.check_weak_target(&ty, target.span);
+                Type::Weak(Box::new(ty))
+            }
             TypeKind::Fn { params, ret, fallible } => {
                 let params = params.iter().map(|p| self.resolve(p)).collect();
                 let ret = ret.as_ref().map(|r| self.resolve(r)).unwrap_or(Type::Void);
                 Type::Fn(Rc::new(FnSig { params, ret, fallible: *fallible }))
             }
+        }
+    }
+
+    fn check_weak_target(&mut self, ty: &Type, span: Span) {
+        if !matches!(ty, Type::Struct(_) | Type::Interface(_) | Type::List(_) | Type::Map(..) | Type::Unknown) {
+            self.err(Diagnostic::new("E0102", format!("there are no weak references to `{ty}`"), span)
+                .help("a weak reference points to an object: a struct, an interface value, a list or a map"));
         }
     }
 
@@ -677,6 +693,7 @@ impl<'a> Checker<'a> {
         match (from, to) {
             (Type::Int, Type::Float) => true,
             (Type::Struct(s), Type::Interface(i)) => self.missing_methods(s, i).is_empty(),
+            (Type::Weak(a), Type::Weak(b)) => self.assignable(a, b),
             (Type::List(a), Type::List(b)) | (Type::Chan(a), Type::Chan(b)) => a.is_unknown() || b.is_unknown(),
             (Type::Map(k1, v1), Type::Map(k2, v2)) => {
                 (k1 == k2 || k1.is_unknown() || k2.is_unknown()) && (v1 == v2 || v1.is_unknown() || v2.is_unknown())
@@ -1519,6 +1536,18 @@ impl<'a> Checker<'a> {
                 }
                 if is_builtin(name) {
                     self.an.calls.insert(e.id, CallKind::Builtin(name.clone()));
+                    if name == "weak" && args.is_empty() {
+                        // An empty weak reference: what it would point to
+                        // comes from where it is used.
+                        return match expected {
+                            Some(ty @ Type::Weak(_)) => (ty.clone(), false),
+                            _ => {
+                                self.err(Diagnostic::new("E0110", "cannot tell what this empty weak reference would point to", e.span)
+                                    .help("say it where the value goes: `var w: weak<Node> = weak()`"));
+                                (Type::Unknown, false)
+                            }
+                        };
+                    }
                     return self.builtin_call(name, e, args);
                 }
                 let d = if self.structs.contains_key(name) {
@@ -1563,7 +1592,7 @@ impl<'a> Checker<'a> {
                         }
                         self.err(Diagnostic::new("E0106", format!("interface `{i}` has no method `{name}`"), *name_span));
                     }
-                    Type::Str | Type::List(_) | Type::Map(..) | Type::Chan(_) => {
+                    Type::Str | Type::List(_) | Type::Map(..) | Type::Chan(_) | Type::Weak(_) => {
                         return self.builtin_method(e, &obj_ty, name, *name_span, args, expected);
                     }
                     Type::Unknown => {}
@@ -1660,6 +1689,14 @@ impl<'a> Checker<'a> {
             "str" => {
                 arity(self, 1);
                 (Type::Str, false)
+            }
+            "weak" => {
+                if arity(self, 1) {
+                    let target = arg_types[0].clone();
+                    self.check_weak_target(&target, args[0].span);
+                    return (Type::Weak(Box::new(target)), false);
+                }
+                (Type::Unknown, false)
             }
             "int" | "float" => {
                 if arity(self, 1) {
@@ -1810,6 +1847,10 @@ impl<'a> Checker<'a> {
             }
             Chan(_) => match name {
                 "close" => Some((Recv::Chan, vec![], Void, false, false)),
+                _ => None,
+            },
+            Weak(target) => match name {
+                "get" => Some((Recv::Weak, vec![], (**target).clone(), true, false)),
                 _ => None,
             },
             _ => None,

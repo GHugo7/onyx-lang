@@ -317,6 +317,12 @@ impl<'a> Parser<'a> {
                         span: start.to(self.prev_span()),
                     });
                 }
+                if name == "weak" && self.peek() == &Tok::Lt {
+                    self.advance();
+                    let target = self.type_expr()?;
+                    self.expect(Tok::Gt, "`>`")?;
+                    return Ok(TypeExpr { kind: TypeKind::Weak(Box::new(target)), span: start.to(self.prev_span()) });
+                }
                 // `module.Type`
                 if self.peek() == &Tok::Dot && matches!(self.peek_at(1), Tok::Ident(_)) {
                     self.advance();

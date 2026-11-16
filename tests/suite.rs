@@ -347,6 +347,21 @@ mod native {
         }
     }
 
+    /// Natively, a weak reference stops working when its object is freed,
+    /// and the object is freed although the reference still exists.
+    #[test]
+    fn weak_references_do_not_keep_objects_alive() {
+        let src = "struct Thing {\n    id: int\n}\n\nfn make() -> weak<Thing> {\n    var thing = Thing{id: 7}\n    var w = weak(thing)\n    print((w.get() or Thing{id: 0}).id)\n    return w\n}\n\nfn main() {\n    var w = make()\n    w.get() catch err {\n        print(err)\n    }\n    var kept = Thing{id: 8}\n    w = weak(kept)\n    print((w.get() or Thing{id: 0}).id)\n}\n";
+        let dir = std::env::temp_dir().join(format!("onyx-native-weak-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("weak.ox");
+        std::fs::write(&file, src).unwrap();
+        let out = Command::new(ONYX).args(["run", "--target", "native", "--leak-check"]).arg(&file).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "7\nthe object is gone\n8\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn runtime_internals_are_hidden_from_programs() {
         let out = run_source("internal.ox", "fn main() {\n    print(__load64(0))\n    __rt_exit(3)\n}\n");
