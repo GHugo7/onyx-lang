@@ -178,6 +178,13 @@ impl<'a> Lower<'a> {
             }
             return;
         }
+        if self.an.variants.contains_key(&call.id) {
+            // `Shape.Circle(...)`: `Shape` is not a value, only the arguments are.
+            if let ExprKind::Call { args, .. } = &mut call.kind {
+                self.operands(args.iter_mut().collect(), out);
+            }
+            return;
+        }
         if let ExprKind::Call { callee, args } = &mut call.kind {
             let mut children: Vec<&mut Expr> = Vec::new();
             if matches!(callee.kind, ExprKind::Field { .. }) {
@@ -368,6 +375,7 @@ impl<'a> Lower<'a> {
             _ => {}
         }
         match &mut stmt.kind {
+            StmtKind::Match { .. } => unreachable!("`match` is rewritten by desugar.rs before this pass"),
             StmtKind::Let { init: e, .. } | StmtKind::Expr(e) | StmtKind::Fail(e) | StmtKind::Return(Some(e)) => {
                 self.expr(e, out);
             }

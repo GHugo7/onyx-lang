@@ -20,6 +20,8 @@ pub enum Type {
     Chan(Box<Type>),
     /// A reference that does not keep its object alive.
     Weak(Box<Type>),
+    /// A value that is one of several variants.
+    Enum(String),
     Struct(String),
     Interface(String),
     Fn(Rc<FnSig>),
@@ -48,6 +50,7 @@ impl fmt::Display for Type {
             Type::Map(k, v) => write!(f, "map<{k}, {v}>"),
             Type::Chan(t) => write!(f, "chan<{t}>"),
             Type::Weak(t) => write!(f, "weak<{t}>"),
+            Type::Enum(name) => write!(f, "{name}"),
             Type::Struct(n) | Type::Interface(n) => write!(f, "{n}"),
             Type::Fn(sig) => {
                 write!(f, "fn(")?;
@@ -134,6 +137,10 @@ pub struct Analysis {
     /// Filled in by the native target: for each lambda, the variables of the
     /// functions around it that it uses, with their types.
     pub captures: HashMap<usize, Vec<(String, Type)>>,
+    /// The variants of each enum, with the types of what they carry.
+    pub enums: HashMap<String, Vec<(String, Vec<Type>)>>,
+    /// Expressions that make a value of an enum: which enum, which variant.
+    pub variants: HashMap<usize, (String, usize)>,
     /// Filled in by the native target: the program starts tasks with `fork`.
     pub has_forks: bool,
 }
@@ -338,14 +345,17 @@ impl<'a> Checker<'a> {
             let (name, span) = match item {
                 Item::Struct(s) => (&s.name, s.name_span),
                 Item::Interface(i) => (&i.name, i.name_span),
+                Item::Enum(e) => (&e.name, e.name_span),
                 _ => continue,
             };
             self.check_reserved(name, span);
             if BUILTIN_TYPES.contains(&name.as_str()) {
                 self.err(Diagnostic::new("E0103", format!("`{name}` is a built-in type"), span));
-            } else if self.structs.contains_key(name) || self.interfaces.contains_key(name) {
+            } else if self.structs.contains_key(name) || self.interfaces.contains_key(name) || self.an.enums.contains_key(name) {
                 self.err(Diagnostic::new("E0103", format!("type `{name}` is defined twice"), span)
                     .label("already defined above"));
+            } else if matches!(item, Item::Enum(_)) {
+                self.an.enums.insert(name.clone(), Vec::new());
             } else if matches!(item, Item::Struct(_)) {
                 self.structs.insert(name.clone(), StructInfo::default());
             } else {
@@ -395,6 +405,21 @@ impl<'a> Checker<'a> {
                         }
                     }
                     self.interfaces.insert(i.name.clone(), info);
+                }
+                Item::Enum(e) => {
+                    let mut variants: Vec<(String, Vec<Type>)> = Vec::new();
+                    for v in &e.variants {
+                        let fields = v.fields.iter().map(|t| self.resolve(t)).collect();
+                        if variants.iter().any(|(n, _)| n == &v.name) {
+                            self.err(Diagnostic::new("E0103", format!("variant `{}` is defined twice", v.name), v.span));
+                        } else {
+                            variants.push((v.name.clone(), fields));
+                        }
+                    }
+                    if variants.is_empty() {
+                        self.err(Diagnostic::new("E0003", format!("enum `{}` has no variant", e.name), e.name_span));
+                    }
+                    self.an.enums.insert(e.name.clone(), variants);
                 }
                 Item::Fn(f) => {
                     let sig = self.signature(&f.params, &f.ret, f.fallible);
@@ -615,6 +640,7 @@ impl<'a> Checker<'a> {
                 "error" => Type::Error,
                 _ if self.structs.contains_key(name) => Type::Struct(name.clone()),
                 _ if self.interfaces.contains_key(name) => Type::Interface(name.clone()),
+                _ if self.an.enums.contains_key(name) => Type::Enum(name.clone()),
                 _ => {
                     let mut d = Diagnostic::new("E0101", format!("unknown type `{name}`"), t.span);
                     let hint = match name.as_str() {
@@ -814,6 +840,127 @@ impl<'a> Checker<'a> {
         sig
     }
 
+    /// If `obj.name` names a variant of an enum (`Shape.Circle`): the enum
+    /// and the position of the variant. An unknown variant is reported.
+    fn variant(&mut self, obj: &Expr, name: &str, span: Span) -> Option<(String, usize)> {
+        let ExprKind::Ident(enum_name) = &obj.kind else { return None };
+        if self.lookup(enum_name).is_some() {
+            return None;
+        }
+        let variants = self.an.enums.get(enum_name)?;
+        match variants.iter().position(|(n, _)| n == name) {
+            Some(index) => Some((enum_name.clone(), index)),
+            None => {
+                let names: Vec<&str> = variants.iter().map(|(n, _)| n.as_str()).collect();
+                let d = Diagnostic::new("E0106", format!("`{enum_name}` has no variant `{name}`"), span)
+                    .help(format!("its variants: {}", names.join(", ")));
+                self.err(d);
+                None
+            }
+        }
+    }
+
+    fn match_stmt(&mut self, stmt: &Stmt, subject: &Expr, arms: &[MatchArm], default: &Option<Block>) {
+        let ty = self.expr(subject, None);
+        let variants = match &ty {
+            Type::Enum(name) => self.an.enums[name].clone(),
+            _ => Vec::new(),
+        };
+        let mut handled = vec![false; variants.len()];
+        let (mut saw_true, mut saw_false) = (false, false);
+        for arm in arms {
+            self.scopes.push(HashMap::new());
+            for pattern in &arm.patterns {
+                match pattern {
+                    Pattern::Literal(value) => {
+                        let plain = match &value.kind {
+                            ExprKind::Int(_) | ExprKind::Bool(_) => true,
+                            ExprKind::Str(parts) => parts.iter().all(|p| matches!(p, StrPart::Lit(_))),
+                            ExprKind::Unary { op: UnOp::Neg, expr } => matches!(expr.kind, ExprKind::Int(_)),
+                            _ => false,
+                        };
+                        if !plain {
+                            self.err(Diagnostic::new("E0003", "a pattern is a whole number, a string, `true`, `false` or a variant", value.span)
+                                .help("for anything else, use `if`"));
+                            continue;
+                        }
+                        let found = self.expr(value, Some(&ty));
+                        if !ty.is_unknown() && found != ty {
+                            self.mismatch(&ty, &found, value.span);
+                        }
+                        match value.kind {
+                            ExprKind::Bool(true) => saw_true = true,
+                            ExprKind::Bool(false) => saw_false = true,
+                            _ => {}
+                        }
+                    }
+                    Pattern::Variant { name, span, bindings } => {
+                        let Type::Enum(enum_name) = &ty else {
+                            if !ty.is_unknown() {
+                                self.err(Diagnostic::new("E0102", format!("`{name}` would be a variant of an enum, but this `match` is on `{ty}`"), *span));
+                            }
+                            continue;
+                        };
+                        let Some(index) = variants.iter().position(|(n, _)| n == name) else {
+                            let names: Vec<&str> = variants.iter().map(|(n, _)| n.as_str()).collect();
+                            self.err(Diagnostic::new("E0106", format!("`{enum_name}` has no variant `{name}`"), *span)
+                                .help(format!("its variants: {}", names.join(", "))));
+                            continue;
+                        };
+                        if handled[index] {
+                            self.err(Diagnostic::new("E0103", format!("`{name}` is already handled above"), *span));
+                        }
+                        handled[index] = true;
+                        let carried = &variants[index].1;
+                        if bindings.len() != carried.len() {
+                            let d = Diagnostic::new(
+                                "E0104",
+                                format!("`{name}` carries {} value{} but {} name{} given", carried.len(), if carried.len() == 1 { "" } else { "s" }, bindings.len(), if bindings.len() == 1 { " was" } else { "s were" }),
+                                *span,
+                            )
+                            .help("give one name per value; `_` for those that are not needed");
+                            self.err(d);
+                            continue;
+                        }
+                        if arm.patterns.len() > 1 && bindings.iter().any(|(n, _)| n != "_") {
+                            self.err(Diagnostic::new("E0003", "a case for several patterns cannot name the values they carry", *span)
+                                .help("write one case per pattern, or use `_`"));
+                            continue;
+                        }
+                        for ((binding, binding_span), field) in bindings.iter().zip(carried) {
+                            if binding != "_" {
+                                self.declare(binding, field.clone(), true, *binding_span);
+                            }
+                        }
+                    }
+                }
+            }
+            self.block(&arm.body);
+            self.scopes.pop();
+        }
+        if let Some(body) = default {
+            self.block(body);
+            return;
+        }
+        // Without `else`, every possible value must have its case.
+        let missing: Vec<&str> = variants.iter().zip(&handled).filter(|(_, done)| !**done).map(|((n, _), _)| n.as_str()).collect();
+        let complete = match &ty {
+            Type::Enum(_) => missing.is_empty(),
+            Type::Bool => saw_true && saw_false,
+            Type::Unknown => true,
+            _ => false,
+        };
+        if !complete {
+            let mut d = Diagnostic::new("E0119", "this `match` does not handle every case", stmt.span);
+            d = if missing.is_empty() {
+                d.help("add an `else { ... }` for the other values")
+            } else {
+                d.help(format!("missing: {}; handle them, or add an `else {{ ... }}`", missing.join(", ")))
+            };
+            self.err(d);
+        }
+    }
+
     fn block(&mut self, block: &Block) {
         self.scopes.push(HashMap::new());
         for stmt in &block.stmts {
@@ -834,6 +981,7 @@ impl<'a> Checker<'a> {
 
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
+            StmtKind::Match { subject, arms, default } => self.match_stmt(stmt, subject, arms, default),
             StmtKind::Let { name, name_span, mutable, ty, init } => {
                 let annotated = ty.as_ref().map(|t| self.resolve(t));
                 let found = self.stmt_expr(init, annotated.as_ref(), true);
@@ -1201,6 +1349,19 @@ impl<'a> Checker<'a> {
                 ty
             }
             ExprKind::Field { obj, name, name_span } => {
+                if let Some((enum_name, index)) = self.variant(obj, name, *name_span) {
+                    // `Shape.Empty`: a variant that carries nothing.
+                    let carried = self.an.enums[&enum_name][index].1.len();
+                    if carried > 0 {
+                        self.err(Diagnostic::new("E0104", format!("`{name}` carries {carried} value{}", if carried == 1 { "" } else { "s" }), e.span)
+                            .help(format!("give {}: `{enum_name}.{name}(...)`", if carried == 1 { "it" } else { "them" })));
+                    }
+                    self.an.variants.insert(e.id, (enum_name.clone(), index));
+                    return Type::Enum(enum_name);
+                }
+                if matches!(&obj.kind, ExprKind::Ident(n) if self.lookup(n).is_none() && self.an.enums.contains_key(n)) {
+                    return Type::Unknown;
+                }
                 let obj_ty = self.expr(obj, None);
                 match &obj_ty {
                     Type::Struct(s) => {
@@ -1564,6 +1725,19 @@ impl<'a> Checker<'a> {
                 (Type::Unknown, false)
             }
             ExprKind::Field { obj, name, name_span } => {
+                if let Some((enum_name, index)) = self.variant(obj, name, *name_span) {
+                    // `Shape.Circle(2.0)`
+                    let carried = self.an.enums[&enum_name][index].1.clone();
+                    self.args(&carried, args, e, &format!("`{name}`"));
+                    self.an.variants.insert(e.id, (enum_name.clone(), index));
+                    return (Type::Enum(enum_name), false);
+                }
+                if matches!(&obj.kind, ExprKind::Ident(n) if self.lookup(n).is_none() && self.an.enums.contains_key(n)) {
+                    for arg in args {
+                        self.expr(arg, None);
+                    }
+                    return (Type::Unknown, false);
+                }
                 let obj_ty = self.expr(obj, None);
                 match &obj_ty {
                     Type::Struct(s) => {
@@ -1896,6 +2070,10 @@ fn stmt_exits(stmt: &Stmt, allow_jump: bool) -> bool {
         StmtKind::Break | StmtKind::Continue => allow_jump,
         StmtKind::Block(b) => exits(b, allow_jump),
         StmtKind::If { then, els: Some(els), .. } => exits(then, allow_jump) && stmt_exits(els, allow_jump),
+        // A `match` handles every case, so it leaves when all its cases do.
+        StmtKind::Match { arms, default, .. } => {
+            arms.iter().all(|arm| exits(&arm.body, allow_jump)) && default.as_ref().is_none_or(|b| exits(b, allow_jump))
+        }
         StmtKind::While { cond, body } => {
             matches!(cond.kind, ExprKind::Bool(true)) && !contains_break(body)
         }
@@ -1910,6 +2088,9 @@ fn contains_break(block: &Block) -> bool {
     block.stmts.iter().any(|s| match &s.kind {
         StmtKind::Break => true,
         StmtKind::Block(b) => contains_break(b),
+        StmtKind::Match { arms, default, .. } => {
+            arms.iter().any(|arm| contains_break(&arm.body)) || default.as_ref().is_some_and(contains_break)
+        }
         StmtKind::If { then, els, .. } => {
             contains_break(then)
                 || els.as_ref().is_some_and(|e| match &e.kind {

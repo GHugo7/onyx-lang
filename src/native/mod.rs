@@ -112,6 +112,8 @@ pub fn generate(
         pending_closures: Vec::new(),
         static_closures: HashMap::new(),
         pending_statics: Vec::new(),
+        plain_variants: HashMap::new(),
+        pending_variants: Vec::new(),
         caches: 0,
         div_zero: None,
         index_oob: None,
@@ -309,14 +311,14 @@ pub fn generate(
 fn is_ref(ty: &Type) -> bool {
     matches!(
         ty,
-        Type::Str | Type::Error | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Interface(_) | Type::Fn(_) | Type::Chan(_) | Type::Weak(_)
+        Type::Str | Type::Error | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Interface(_) | Type::Fn(_) | Type::Chan(_) | Type::Weak(_) | Type::Enum(_)
     )
 }
 
 fn supported(ty: &Type) -> bool {
     match ty {
         Type::Int | Type::Float | Type::Bool | Type::Str | Type::Error | Type::Void | Type::Range | Type::Unknown => true,
-        Type::Struct(_) | Type::Interface(_) => true,
+        Type::Struct(_) | Type::Interface(_) | Type::Enum(_) => true,
         Type::Fn(sig) => sig.params.iter().all(supported) && supported(&sig.ret),
         Type::List(elem) | Type::Chan(elem) | Type::Weak(elem) => supported(elem),
         Type::Map(key, value) => **key != Type::Float && supported(key) && supported(value),
@@ -453,6 +455,7 @@ struct FnItem<'a> {
 fn lambdas_in<'a>(block: &'a Block, out: &mut Vec<&'a Expr>) {
     fn stmt<'a>(s: &'a Stmt, out: &mut Vec<&'a Expr>) {
         match &s.kind {
+            StmtKind::Match { .. } => unreachable!("`match` is rewritten by desugar.rs before this pass"),
             StmtKind::Let { init: e, .. } | StmtKind::Expr(e) | StmtKind::Fail(e) | StmtKind::Return(Some(e)) => expr(e, out),
             StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
             StmtKind::Assign { target, value, .. } => {
@@ -588,6 +591,9 @@ struct Gen<'a> {
     pending_closures: Vec<(Vec<Type>, Label)>,
     static_closures: HashMap<String, Label>,
     pending_statics: Vec<(String, Label)>,
+    /// Variants that carry nothing, each a constant object.
+    plain_variants: HashMap<(String, usize), Label>,
+    pending_variants: Vec<(String, usize, Label)>,
     /// Number of interface call sites; each has a two-word cache after the globals.
     caches: usize,
     /// Shared pieces of code that report an error and never return.
@@ -701,7 +707,11 @@ impl<'a> Gen<'a> {
     }
 
     fn emit_descriptors(&mut self) -> bool {
-        if self.pending_descriptors.is_empty() && self.pending_closures.is_empty() && self.pending_statics.is_empty() {
+        if self.pending_descriptors.is_empty()
+            && self.pending_closures.is_empty()
+            && self.pending_statics.is_empty()
+            && self.pending_variants.is_empty()
+        {
             return false;
         }
         while let Some((ty, label)) = self.pending_descriptors.pop() {
@@ -712,6 +722,33 @@ impl<'a> Gen<'a> {
                     self.asm.bind(label);
                     self.asm.word(4);
                     self.asm.address(elem);
+                }
+                Type::Enum(name) => {
+                    // The enum's name, then for each variant the address of
+                    // its own table: its name and the descriptors of what
+                    // it carries.
+                    let variants = self.an.enums[name].clone();
+                    let name_label = self.string(name);
+                    let mut tables = Vec::new();
+                    for (variant, fields) in &variants {
+                        let fields: Vec<Label> = fields.iter().map(|ty| self.descriptor(ty)).collect();
+                        tables.push((self.asm.new_label(), self.string(variant), fields));
+                    }
+                    self.asm.bind(label);
+                    self.asm.word(12);
+                    self.asm.address(name_label);
+                    self.asm.word(tables.len() as u64);
+                    for (table, _, _) in &tables {
+                        self.asm.address(*table);
+                    }
+                    for (table, variant, fields) in tables {
+                        self.asm.bind(table);
+                        self.asm.address(variant);
+                        self.asm.word(fields.len() as u64);
+                        for td in fields {
+                            self.asm.address(td);
+                        }
+                    }
                 }
                 Type::Chan(elem) => {
                     // Written like the descriptor of a struct with seven
@@ -806,6 +843,15 @@ impl<'a> Gen<'a> {
                 self.asm.address(name);
                 self.asm.address(td);
             }
+        }
+        while let Some((name, index, label)) = self.pending_variants.pop() {
+            // A variant that carries nothing: one constant, never released.
+            let td = self.descriptor(&Type::Enum(name));
+            self.asm.align(8);
+            self.asm.bind(label);
+            self.asm.half(-1i32 as u32);
+            self.asm.address32(td);
+            self.asm.word(index as u64);
         }
         while let Some((key, label)) = self.pending_statics.pop() {
             // A function that captures nothing: one constant closure, never released.
@@ -1299,6 +1345,7 @@ impl<'a> Gen<'a> {
     fn stmt(&mut self, stmt: &Stmt) {
         let tail = std::mem::replace(&mut self.at_tail, false);
         match &stmt.kind {
+            StmtKind::Match { .. } => unreachable!("`match` is rewritten by desugar.rs before this pass"),
             StmtKind::Let { name, name_span, init, .. } if matches!(init.kind, ExprKind::Catch { .. }) => {
                 // The variable only exists once one of the two paths gave it a value.
                 let ty = self.ty(init);
@@ -2070,6 +2117,9 @@ impl<'a> Gen<'a> {
         if !supported(&ty) {
             self.unsupported(e.span, &format!("values of type `{ty}`"));
             return;
+        }
+        if let Some((name, index)) = self.an.variants.get(&e.id).cloned() {
+            return self.variant(e, &name, index);
         }
         match &e.kind {
             ExprKind::Int(n) => self.asm.mov_imm(RAX, *n),
@@ -3374,6 +3424,41 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A value of an enum: the position of its variant, then what it carries.
+    fn variant(&mut self, e: &Expr, name: &str, index: usize) {
+        let args: &[Expr] = match &e.kind {
+            ExprKind::Call { args, .. } => args,
+            _ => &[],
+        };
+        if args.is_empty() {
+            let key = (name.to_string(), index);
+            let label = match self.plain_variants.get(&key) {
+                Some(&label) => label,
+                None => {
+                    let label = self.asm.new_label();
+                    self.plain_variants.insert(key, label);
+                    self.pending_variants.push((name.to_string(), index, label));
+                    label
+                }
+            };
+            self.asm.lea(RAX, label);
+            return;
+        }
+        let td = self.descriptor(&Type::Enum(name.to_string()));
+        self.asm.lea(RAX, td);
+        self.asm.push(RAX);
+        self.asm.push_imm(16 + 8 * args.len() as i32);
+        self.call_runtime("__rt_new", 2);
+        self.asm.store_imm(RAX, 8, index as i32);
+        self.asm.push(RAX);
+        for (i, arg) in args.iter().enumerate() {
+            self.expr(arg);
+            self.asm.load(RCX, RSP, 0);
+            self.asm.store(RCX, 16 + 8 * i as i32, RAX);
+        }
+        self.asm.pop(RAX);
+    }
+
     /// `for v in channel`: receives until the channel is closed and empty.
     fn for_chan(&mut self, var: &str, var_span: Span, iter: &Expr, body: &Block, elem: &Type) {
         let (top, next, end) = (self.asm.new_label(), self.asm.new_label(), self.asm.new_label());
@@ -3695,6 +3780,21 @@ impl<'a> Gen<'a> {
             "weak" => {
                 let table = Type::Map(Box::new(Type::Int), Box::new(Type::Int));
                 self.call_rt("__rt_weak", &[Arg::Borrow(&args[0]), Arg::Descriptor(self.ty(e)), Arg::Descriptor(table)], true);
+            }
+            // What `match` is rewritten with (see desugar.rs): the position of
+            // the variant of an enum value, and one of the values it carries.
+            "__tag" => {
+                let owned = self.operand(&args[0]);
+                debug_assert!(!owned);
+                self.asm.load(RAX, RAX, 8);
+            }
+            "__field" => {
+                let ExprKind::Int(which) = args[1].kind else { return };
+                self.operand(&args[0]);
+                self.asm.load(RAX, RAX, 16 + 8 * which as i32);
+                if is_ref(&self.ty(e)) {
+                    self.retain(RAX);
+                }
             }
             "__fork" => {
                 // The closure belongs to the new task from here on.

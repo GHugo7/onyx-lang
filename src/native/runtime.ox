@@ -205,6 +205,18 @@ fn __rt_destroy(p: int) {
     }
     if kind == 11 {
         size = 16
+    } else if kind == 12 {
+        // A value of an enum: what it carries depends on its variant.
+        var variant = __load64(td + 24 + __load64(p + 8) * 8)
+        var count = __load64(variant + 8)
+        var k = 0
+        while k < count {
+            if __load64(__load64(variant + 16 + k * 8)) >= 3 {
+                __rt_release(__load64(p + 16 + k * 8))
+            }
+            k += 1
+        }
+        size = 16 + count * 8
     } else if kind == __KIND_STRING {
         size = 16 + __load32(p + 12)
     } else if kind == __KIND_LIST {
@@ -2164,6 +2176,26 @@ fn __rt_repr(v: int, td: int, quoted: bool) -> string {
     if kind == 11 {
         return "weak"
     }
+    if kind == 12 {
+        // `Shape.Circle(2.0)`, `Shape.Empty`
+        var variant = __load64(td + 24 + __load64(v + 8) * 8)
+        var shown = __ptr_str(__load64(td + 8)) + "." + __ptr_str(__load64(variant))
+        var carried = __load64(variant + 8)
+        var f = 0
+        while f < carried {
+            if f == 0 {
+                shown += "("
+            } else {
+                shown += ", "
+            }
+            shown += __rt_repr(__load64(v + 16 + f * 8), __load64(variant + 16 + f * 8), true)
+            f += 1
+        }
+        if carried > 0 {
+            shown += ")"
+        }
+        return shown
+    }
     if kind == __KIND_LIST {
         var elem = __load64(td + 8)
         var count = __load64(v + 8)
@@ -2226,6 +2258,22 @@ fn __rt_eq(a: int, b: int, td: int) -> bool {
     if kind == 2 {
         // Not the same as equal bits: 0.0 equals -0.0, and NaN equals nothing.
         return __float(a) == __float(b)
+    }
+    if kind == 12 {
+        // The same variant, carrying equal values.
+        if __load64(a + 8) != __load64(b + 8) {
+            return false
+        }
+        var variant = __load64(td + 24 + __load64(a + 8) * 8)
+        var carried = __load64(variant + 8)
+        var f = 0
+        while f < carried {
+            if !__rt_eq(__load64(a + 16 + f * 8), __load64(b + 16 + f * 8), __load64(variant + 16 + f * 8)) {
+                return false
+            }
+            f += 1
+        }
+        return true
     }
     if kind < 3 || kind >= 10 || a == b {
         return a == b

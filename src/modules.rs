@@ -128,6 +128,9 @@ fn module_info(module: &Module) -> ModInfo {
             Item::Interface(i) => {
                 info.types.insert(i.name.clone());
             }
+            Item::Enum(e) => {
+                info.types.insert(e.name.clone());
+            }
             Item::Global(Stmt { kind: StmtKind::Let { name, .. }, .. }) => {
                 info.values.insert(name.clone());
             }
@@ -315,6 +318,14 @@ impl<'a> Resolver<'a> {
                     self.function(m);
                 }
             }
+            Item::Enum(e) => {
+                e.name = self.qualify(self.me, &e.name);
+                for variant in &mut e.variants {
+                    for field in &mut variant.fields {
+                        self.type_expr(field);
+                    }
+                }
+            }
             Item::Interface(i) => {
                 i.name = self.qualify(self.me, &i.name);
                 for m in &mut i.methods {
@@ -410,6 +421,24 @@ impl<'a> Resolver<'a> {
                 self.expr(chan);
                 self.expr(value);
             }
+            StmtKind::Match { subject, arms, default } => {
+                self.expr(subject);
+                for arm in arms {
+                    let mut names = HashSet::new();
+                    for pattern in &mut arm.patterns {
+                        match pattern {
+                            Pattern::Literal(value) => self.expr(value),
+                            Pattern::Variant { bindings, .. } => names.extend(bindings.iter().map(|(name, _)| name.clone())),
+                        }
+                    }
+                    self.scopes.push(names);
+                    self.block(&mut arm.body);
+                    self.scopes.pop();
+                }
+                if let Some(body) = default {
+                    self.block(body);
+                }
+            }
         }
     }
 
@@ -421,6 +450,11 @@ impl<'a> Resolver<'a> {
                     if let Some(&module) = self.imports.get(alias) {
                         let info = &self.infos[module];
                         if info.values.contains(name) {
+                            let (name, span) = (name.clone(), *name_span);
+                            self.check_private(module, &name, span);
+                            e.kind = ExprKind::Ident(self.qualify(module, &name));
+                        } else if info.types.contains(name) {
+                            // `module.Enum`, on its way to `module.Enum.Variant`.
                             let (name, span) = (name.clone(), *name_span);
                             self.check_private(module, &name, span);
                             e.kind = ExprKind::Ident(self.qualify(module, &name));
@@ -447,7 +481,9 @@ impl<'a> Resolver<'a> {
                 }
             }
             ExprKind::Ident(name) => {
-                if !self.is_local(name) && self.infos[self.me].values.contains(name.as_str()) {
+                let mine = &self.infos[self.me];
+                // A type name in an expression is an enum: `Shape.Circle(1.0)`.
+                if !self.is_local(name) && (mine.values.contains(name.as_str()) || mine.types.contains(name.as_str())) {
                     *name = self.qualify(self.me, name);
                 }
             }

@@ -35,6 +35,7 @@ The native target is being built up step by step. It currently supports:
 - error handling: functions that return `T!`, `fail`, `?`, `or`, `catch`,
   the `error` type, and a `main` that can fail
 - functions, recursion, any number of parameters
+- enums and `match`
 - weak references (`weak<T>`)
 - lambdas and closures, functions as values (in variables, fields, lists,
   maps), and the list methods `map`, `filter` and `sort_by`

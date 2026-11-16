@@ -8,6 +8,7 @@
 - Error handling with `!`, `?`, `or`, `catch`, `fail`
 - `fork` and channels
 - `check` blocks and `onyx test`
+- Enums and `match`, weak references
 - Modules: `import "file"` with namespaced access and private names
 - JavaScript backend; `onyx run` uses Node.js
 
@@ -49,7 +50,6 @@ for what works today.
 
 ## Language features under consideration
 
-- Enums and `match`
 - Generic functions and structs
 - Optional values (`T?`)
 - Named arguments

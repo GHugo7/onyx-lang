@@ -12,12 +12,45 @@ pub enum Item {
     Fn(FnDecl),
     Struct(StructDecl),
     Interface(InterfaceDecl),
+    Enum(EnumDecl),
     /// A top-level `var` / `const`.
     Global(Stmt),
     /// A `check "name" { ... }` test block.
     Check { name: String, body: Block },
     /// `import "path"` or `import "path" as alias`.
     Import { path: String, alias: Option<String>, span: Span },
+}
+
+/// `enum Shape { Circle(float), Rect(w: float, h: float), Empty }`
+#[derive(Debug, Clone)]
+pub struct EnumDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub variants: Vec<VariantDecl>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VariantDecl {
+    pub name: String,
+    pub span: Span,
+    /// The types of the values it carries (their names, if any, are only
+    /// there for the reader).
+    pub fields: Vec<TypeExpr>,
+}
+
+/// One case of a `match`: the patterns it is for, and what to do.
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub patterns: Vec<Pattern>,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// A number, a string, `true` or `false`.
+    Literal(Expr),
+    /// A variant of an enum, with names for the values it carries.
+    Variant { name: String, span: Span, bindings: Vec<(String, Span)> },
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +155,9 @@ pub enum StmtKind {
     Fork(Block),
     Send { chan: Expr, value: Expr },
     Block(Block),
+    /// `match subject { pattern { ... } else { ... } }`. Only the checker
+    /// sees it: it is then rewritten with `if` (see desugar.rs).
+    Match { subject: Expr, arms: Vec<MatchArm>, default: Option<Block> },
 }
 
 #[derive(Debug, Clone)]

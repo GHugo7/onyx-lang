@@ -33,7 +33,7 @@ pub fn widen(program: &mut Program, an: &mut Analysis) {
             }
             Item::Global(stmt) => w.stmt(stmt),
             Item::Check { body, .. } => w.block(body),
-            Item::Interface(_) | Item::Import { .. } => {}
+            Item::Interface(_) | Item::Enum(_) | Item::Import { .. } => {}
         }
     }
 }
@@ -59,6 +59,7 @@ impl<'a> Widen<'a> {
 
     fn stmt(&mut self, stmt: &mut Stmt) {
         match &mut stmt.kind {
+            StmtKind::Match { .. } => unreachable!("`match` is rewritten by desugar.rs before this pass"),
             StmtKind::Let { init: e, .. } | StmtKind::Expr(e) | StmtKind::Fail(e) | StmtKind::Return(Some(e)) => self.expr(e),
             StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
             StmtKind::Assign { target, value, .. } => {

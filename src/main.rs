@@ -3,6 +3,7 @@
 mod ast;
 mod checker;
 mod codegen_js;
+mod desugar;
 mod diagnostics;
 mod lexer;
 mod modules;
@@ -137,6 +138,7 @@ fn compile(path: &Path, test_mode: bool, target: Target) -> Output {
         Ok(analysis) => analysis,
         Err(diags) => report(&diags),
     };
+    desugar::desugar(&mut program, &mut analysis);
     optimize::optimize(&mut program);
     match target {
         Target::Js => Output::Js(codegen_js::generate(

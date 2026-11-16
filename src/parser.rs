@@ -104,6 +104,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Tok::Fn => Ok(Item::Fn(self.fn_decl(false)?)),
             Tok::Struct => self.struct_decl(),
+            Tok::Enum => self.enum_decl(),
             Tok::Interface => self.interface_decl(),
             Tok::Var | Tok::Const => Ok(Item::Global(self.let_stmt()?)),
             Tok::Import => {
@@ -244,6 +245,90 @@ impl<'a> Parser<'a> {
         Ok(Item::Struct(StructDecl { name, name_span, fields, methods }))
     }
 
+    fn enum_decl(&mut self) -> PResult<Item> {
+        self.advance();
+        let (name, name_span) = self.ident("an enum name")?;
+        self.expect(Tok::LBrace, "`{`")?;
+        let mut variants = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            let (vname, span) = self.ident("a variant name or `}`")?;
+            let mut fields = Vec::new();
+            if self.eat(&Tok::LParen) {
+                while self.peek() != &Tok::RParen {
+                    // `radius: float` or just `float`
+                    if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon {
+                        self.advance();
+                        self.advance();
+                    }
+                    fields.push(self.type_expr()?);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RParen, "`)`")?;
+            }
+            variants.push(VariantDecl { name: vname, span, fields });
+            while self.eat(&Tok::Comma) || self.eat(&Tok::Semi) {}
+        }
+        self.advance();
+        Ok(Item::Enum(EnumDecl { name, name_span, variants }))
+    }
+
+    fn match_stmt(&mut self) -> PResult<Stmt> {
+        let start = self.advance().span;
+        let subject = self.with_no_struct(true, |p| p.expr())?;
+        self.expect(Tok::LBrace, "`{`")?;
+        let mut arms = Vec::new();
+        let mut default = None;
+        loop {
+            while self.eat(&Tok::Semi) {}
+            if self.peek() == &Tok::RBrace {
+                break;
+            }
+            if self.eat(&Tok::Else) {
+                let body = self.with_no_struct(false, |p| p.block())?;
+                if default.is_some() {
+                    return Err(Diagnostic::new("E0003", "this `match` already has an `else`", body.span));
+                }
+                default = Some(body);
+                continue;
+            }
+            let mut patterns = Vec::new();
+            loop {
+                patterns.push(self.pattern()?);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            let body = self.with_no_struct(false, |p| p.block())?;
+            arms.push(MatchArm { patterns, body });
+        }
+        let end = self.advance().span;
+        Ok(Stmt { span: start.to(end), kind: StmtKind::Match { subject, arms, default } })
+    }
+
+    fn pattern(&mut self) -> PResult<Pattern> {
+        if !matches!(self.peek(), Tok::Ident(_)) {
+            return Ok(Pattern::Literal(self.with_no_struct(true, |p| p.range())?));
+        }
+        // `Variant`, `Variant(a, b)`, and the same after `Enum.` or `module.Enum.`
+        let (mut name, mut span) = self.ident("a pattern")?;
+        while self.eat(&Tok::Dot) {
+            (name, span) = self.ident("a variant name")?;
+        }
+        let mut bindings = Vec::new();
+        if self.eat(&Tok::LParen) {
+            while self.peek() != &Tok::RParen {
+                bindings.push(self.ident("a name for this value")?);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(Tok::RParen, "`)`")?;
+        }
+        Ok(Pattern::Variant { name, span, bindings })
+    }
+
     fn interface_decl(&mut self) -> PResult<Item> {
         self.advance();
         let (name, name_span) = self.ident("an interface name")?;
@@ -381,6 +466,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             Tok::Var | Tok::Const => self.let_stmt(),
             Tok::If => self.if_stmt(),
+            Tok::Match => self.match_stmt(),
             Tok::While => {
                 self.advance();
                 let cond = self.with_no_struct(true, |p| p.expr())?;

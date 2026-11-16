@@ -100,6 +100,27 @@ pub fn generate(program: &Program, an: &Analysis, opts: &Options) -> String {
         if let Item::Struct(s) = item {
             g.strukt(s);
         }
+        if let Item::Enum(e) = item {
+            // A value of an enum: which variant (`v`) and what it carries (`f`).
+            let variants = &an.enums[&e.name];
+            let names: Vec<String> = variants.iter().map(|(name, _)| js_string(name)).collect();
+            let floats: Vec<String> = variants
+                .iter()
+                .map(|(_, fields)| {
+                    let shapes: Vec<String> = fields.iter().map(|ty| float_shape(ty).unwrap_or_else(|| "0".to_string())).collect();
+                    format!("[{}]", shapes.join(", "))
+                })
+                .collect();
+            g.line(&format!("class {} {{", js_name(&e.name)));
+            g.line("  constructor(v, f) {");
+            g.line("    this.v = v;");
+            g.line("    this.f = f;");
+            g.line("  }");
+            g.line(&format!("  static $enum = {};", js_string(&e.name)));
+            g.line(&format!("  static $variants = [{}];", names.join(", ")));
+            g.line(&format!("  static $floats = [{}];", floats.join(", ")));
+            g.line("}");
+        }
     }
     for item in &program.items {
         if let Item::Fn(f) = item {
@@ -248,6 +269,7 @@ impl<'a> Gen<'a> {
 
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
+            StmtKind::Match { .. } => unreachable!("`match` is rewritten by desugar.rs before this pass"),
             StmtKind::Let { name, init, .. } => {
                 if let ExprKind::Catch { .. } = &init.kind {
                     // Declare first so the sink can assign from both branches.
@@ -557,6 +579,10 @@ impl<'a> Gen<'a> {
                 }
             }
             ExprKind::Call { callee, args } => self.call(e, callee, args),
+            ExprKind::Field { .. } if self.an.variants.contains_key(&e.id) => {
+                let (name, index) = self.an.variants[&e.id].clone();
+                format!("new {}({index}, [])", js_name(&name))
+            }
             ExprKind::Field { obj, name, .. } => {
                 let o = self.expr(obj);
                 format!("{o}.{}", prop(name))
@@ -638,6 +664,9 @@ impl<'a> Gen<'a> {
     }
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Expr]) -> String {
+        if let Some((name, index)) = self.an.variants.get(&e.id).cloned() {
+            return format!("new {}({index}, [{}])", js_name(&name), self.exprs(args));
+        }
         let kind = self.an.calls.get(&e.id).cloned().unwrap_or(CallKind::Dynamic);
         match kind {
             CallKind::Fn(name) => {
@@ -717,6 +746,13 @@ impl<'a> Gen<'a> {
             "now" => "Date.now()".to_string(),
             "random" => "Math.random()".to_string(),
             "random_int" => format!("$rt.randomInt({a})"),
+            // What `match` is rewritten with (see desugar.rs).
+            "__tag" => format!("{a}.v"),
+            "__field" => {
+                let value = self.expr(&args[0]);
+                let which = self.expr(&args[1]);
+                format!("{value}.f[{which}]")
+            }
             "weak" if args.is_empty() => "$rt.noWeak".to_string(),
             "weak" => format!("$rt.weak({a})"),
             "input" => format!("$rt.input({a})"),

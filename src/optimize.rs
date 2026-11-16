@@ -159,6 +159,7 @@ impl Folder {
     fn stmt(&mut self, stmt: &mut Stmt) -> bool {
         let mut replacement: Option<StmtKind> = None;
         match &mut stmt.kind {
+            StmtKind::Match { .. } => unreachable!("`match` is rewritten by desugar.rs before this pass"),
             StmtKind::Let { name, mutable, init, ty, .. } => {
                 self.expr(init);
                 let value = if *mutable { None } else { constant(init, ty) };

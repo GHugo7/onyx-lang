@@ -111,6 +111,7 @@ impl<'a> Planner<'a> {
 
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
+            StmtKind::Match { .. } => unreachable!("`match` is rewritten by desugar.rs before this pass"),
             StmtKind::Let { name, name_span, init, .. } => {
                 self.expr(init);
                 self.declare(Some(name), (name_span.start, NAMED), 1);

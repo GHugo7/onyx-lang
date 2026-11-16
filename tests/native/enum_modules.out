@@ -1,0 +1,10 @@
+[tokens.Token.Number(12), tokens.Token.Plus, tokens.Token.Open, tokens.Token.Number(3), tokens.Token.Times, tokens.Token.Number(4), tokens.Token.Close]
+1 + 2 * 3 = 7
+(1 + 2) * 3 = 9
+2 * (3 + 4) * 5 + 1 = 71
+7 = 7
+2 + -> unexpected end
+(1 + 2 -> unexpected end
+1 2 -> left over: tokens.Token.Number(2)
+* 3 -> unexpected tokens.Token.Times
+tokens.Token.Number(4) true tokens.Token.Plus

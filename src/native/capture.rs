@@ -66,6 +66,7 @@ impl<'a> Forks<'a> {
     fn stmt(&mut self, stmt: &mut Stmt) {
         let span = stmt.span;
         match &mut stmt.kind {
+            StmtKind::Match { .. } => unreachable!("`match` is rewritten by desugar.rs before this pass"),
             StmtKind::Fork(body) => {
                 self.block(body);
                 self.an.has_forks = true;
@@ -300,6 +301,7 @@ impl<'a> Finder<'a> {
 
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
+            StmtKind::Match { .. } => unreachable!("`match` is rewritten by desugar.rs before this pass"),
             StmtKind::Let { name, name_span, init, .. } => {
                 self.expr(init);
                 self.declare(name, (name_span.start, false));
@@ -509,6 +511,7 @@ impl<'a> Boxer<'a> {
 
     fn stmt(&mut self, stmt: &mut Stmt) {
         match &mut stmt.kind {
+            StmtKind::Match { .. } => unreachable!("`match` is rewritten by desugar.rs before this pass"),
             StmtKind::Let { name, name_span, init, ty, .. } => {
                 self.expr(init);
                 let key = (name_span.start, false);

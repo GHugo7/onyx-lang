@@ -43,6 +43,13 @@ const $rt = (() => {
     if (v instanceof Weak) return "weak";
     if (typeof v === "function") return "fn";
     if (v === undefined) return "void";
+    if (v.constructor.$variants) {
+      // A value of an enum: `Shape.Circle(2.0)`, `Shape.Empty`.
+      const c = v.constructor;
+      const shapes = c.$floats[v.v];
+      const carried = v.f.map((x, i) => repr(x, shapes[i] || undefined));
+      return c.$enum + "." + c.$variants[v.v] + (carried.length ? "(" + carried.join(", ") + ")" : "");
+    }
     const floats = v.constructor.$floats;
     const fields = Object.keys(v).map((k) => k + ": " + repr(v[k], floats && floats[k]));
     return (v.constructor.$name || v.constructor.name) + "{" + fields.join(", ") + "}";

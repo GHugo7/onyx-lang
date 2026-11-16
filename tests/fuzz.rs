@@ -156,6 +156,44 @@ fn average(xs: [float]) -> float {
     return total / xs.len()
 }
 
+enum Cmd {
+    Add(int)
+    Scale(by: int, then: int)
+    Say(string)
+    Both(Cmd, Cmd)
+    Reset
+}
+
+fn run_cmd(c: Cmd, depth: int) -> int {
+    match c {
+        Add(n) {
+            g_count = (g_count + n) % 1000
+            return n % 1000
+        }
+        Scale(by, then) {
+            g_count = (g_count * (by % 7) + then) % 1000
+        }
+        Say(text) {
+            if g_text.len() < 40 {
+                g_text += text
+            }
+            return text.len()
+        }
+        Both(first, second) {
+            if depth > 3 {
+                return -1
+            }
+            return (run_cmd(first, depth + 1) + run_cmd(second, depth + 1)) % 1000
+        }
+        Reset {
+            g_count = 0
+        }
+    }
+    return g_count
+}
+
+var g_cmds: [Cmd] = [Cmd.Reset]
+
 fn apply(f: fn(int) -> int, n: int) -> int {
     return f(n) % 1000003
 }
@@ -1005,7 +1043,8 @@ impl Gen {
 
     fn stmt(&mut self) {
         self.budget -= 1;
-        match self.rng.below(39) {
+        match self.rng.below(43) {
+            39..=42 => self.enum_op(),
             35..=38 => self.closure_op(),
             31..=34 => self.float_op(),
             26 | 27 => self.catch_stmt(),
@@ -1614,6 +1653,86 @@ impl Gen {
                     self.line("}");
                 }
             },
+        }
+    }
+
+    /// A value of the enum `Cmd`.
+    fn cmd(&mut self, depth: u32) -> String {
+        match self.rng.below(if depth == 0 { 5 } else { 7 }) {
+            0 | 1 => format!("Cmd.Add({})", self.bounded_int(1)),
+            2 => format!("Cmd.Scale({}, {})", self.rng.between(-9, 9), self.bounded_int(1)),
+            3 => format!("Cmd.Say({})", self.short_string().0),
+            4 => "Cmd.Reset".to_string(),
+            _ => format!("Cmd.Both({}, {})", self.cmd(depth - 1), self.cmd(depth - 1)),
+        }
+    }
+
+    /// Enums and `match`.
+    fn enum_op(&mut self) {
+        let c = self.calmly(|g| g.cmd(2));
+        let e = self.calmly(|g| g.bounded_int(2));
+        match self.rng.below(9) {
+            0 | 1 => {
+                self.line("if g_cmds.len() < 10 {");
+                self.line(&format!("    g_cmds.push({c})"));
+                self.line("}");
+            }
+            2 => self.line(&format!("print(run_cmd({c}, 0), g_count)")),
+            3 => {
+                let other = self.calmly(|g| g.cmd(1));
+                self.line(&format!("print({c}, {c} == {other}, g_cmds.contains({other}))"));
+            }
+            4 => {
+                let (n, x) = (self.fresh("n"), self.fresh("c"));
+                self.line(&format!("var {n} = 0"));
+                self.line(&format!("for {x} in g_cmds.slice(0, 6) {{"));
+                self.line(&format!("    {n} = ({n} + run_cmd({x}, 0)) % 1000"));
+                self.line("}");
+                self.line(&format!("print({n}, g_cmds.len())"));
+            }
+            5 => {
+                let name = self.fresh("w");
+                self.line(&format!("var {name} = \"\""));
+                self.line(&format!("match {c} {{"));
+                self.line("    Add(_), Reset {");
+                self.line(&format!("        {name} = \"number\""));
+                self.line("    }");
+                self.line("    Say(text) {");
+                self.line(&format!("        {name} = text + \"!\""));
+                self.line("    }");
+                self.line("    else {");
+                self.line(&format!("        {name} = \"other\""));
+                self.line("    }");
+                self.line("}");
+                self.line(&format!("print({name})"));
+            }
+            6 => {
+                self.line(&format!("match ({e}) % 5 {{"));
+                self.line("    0 {");
+                self.line("        g_text += \"z\"");
+                self.line("    }");
+                self.line("    1, -1, 2 {");
+                self.line("        g_count = (g_count + 3) % 1000");
+                self.line("    }");
+                self.line("    else {");
+                self.line("        g_count = (g_count + 1) % 1000");
+                self.line("    }");
+                self.line("}");
+            }
+            7 => {
+                let (s, _) = self.calmly(|g| g.short_string());
+                self.line(&format!("match {s} {{"));
+                self.line("    \"\", \"a\" {");
+                self.line("        g_count = (g_count + 7) % 1000");
+                self.line("    }");
+                self.line("    \"onyx\" {");
+                self.line("        g_text += \"o\"");
+                self.line("    }");
+                self.line("    else {");
+                self.line("    }");
+                self.line("}");
+            }
+            _ => self.line("print(g_cmds)"),
         }
     }
 
