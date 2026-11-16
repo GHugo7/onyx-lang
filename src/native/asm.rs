@@ -564,7 +564,13 @@ impl Asm {
 
     /// `dst = dst op src` (`dst = src` for `Mov`, `dst = sqrt(src)` for `Sqrt`)
     pub fn sse(&mut self, op: Sse, dst: Xmm, src: Xmm) {
-        self.buf.extend_from_slice(&[0xF2, 0x0F, op as u8]);
+        if op == Sse::Mov {
+            // A copy of the whole register (movaps): copying only the low
+            // half would make the result depend on what `dst` held before.
+            self.buf.extend_from_slice(&[0x0F, 0x28]);
+        } else {
+            self.buf.extend_from_slice(&[0xF2, 0x0F, op as u8]);
+        }
         self.rr(dst, src);
     }
 
@@ -574,6 +580,14 @@ impl Asm {
         self.rex_opt(dst, 0, base);
         self.buf.extend_from_slice(&[0x0F, op as u8]);
         self.mem(dst, base, disp);
+    }
+
+    /// `[base + disp] = src`
+    pub fn sse_store(&mut self, base: Reg, disp: i32, src: Xmm) {
+        self.buf.push(0xF2);
+        self.rex_opt(src, 0, base);
+        self.buf.extend_from_slice(&[0x0F, 0x11]);
+        self.mem(src, base, disp);
     }
 
     /// Compares two floats. The flags come out as for unsigned integers
@@ -835,6 +849,8 @@ mod tests {
         assert_eq!(emit(|a| a.sse_load(Sse::Mul, XMM0, R15, 4104)), [0xF2, 0x41, 0x0F, 0x59, 0x87, 0x08, 0x10, 0, 0]);
         assert_eq!(emit(|a| a.sse_load(Sse::Sub, XMM1, RSP, 0)), [0xF2, 0x0F, 0x5C, 0x0C, 0x24]);
         assert_eq!(emit(|a| a.sse_load(Sse::Mov, XMM0, RBP, -8)), [0xF2, 0x0F, 0x10, 0x45, 0xF8]);
+        assert_eq!(emit(|a| a.sse_store(RBP, -8, XMM0)), [0xF2, 0x0F, 0x11, 0x45, 0xF8]);
+        assert_eq!(emit(|a| a.sse(Sse::Mov, 3, XMM0)), [0x0F, 0x28, 0xD8]);
         assert_eq!(emit(|a| a.ucomisd(XMM0, XMM1)), [0x66, 0x0F, 0x2E, 0xC1]);
         assert_eq!(emit(|a| a.ucomisd(XMM1, XMM0)), [0x66, 0x0F, 0x2E, 0xC8]);
         assert_eq!(emit(|a| a.cvtsi2sd(XMM0, RAX)), [0xF2, 0x48, 0x0F, 0x2A, 0xC0]);

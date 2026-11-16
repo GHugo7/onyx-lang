@@ -78,6 +78,9 @@ const NUMBER_BUFFER: i32 = 40;
 /// Registers that hold local variables.
 const VARIABLE_REGS: [Reg; 6] = [RBX, R12, R13, R14, RSI, RDI];
 
+/// Registers that hold float variables (XMM0 and XMM1 are for computing).
+const FLOAT_REGS: [Xmm; 6] = [2, 3, 4, 5, 6, 7];
+
 /// Key of the `self` parameter of a method (its position is the method's name).
 const SELF: u8 = 3;
 
@@ -117,6 +120,8 @@ pub fn generate(
         fault_entry: None,
         scopes: Vec::new(),
         regs: HashMap::new(),
+        float_regs: HashMap::new(),
+        in_xmm: HashMap::new(),
         slots: 0,
         loops: Vec::new(),
         epilogue: None,
@@ -600,6 +605,12 @@ struct Gen<'a> {
     scopes: Vec<Vec<Var>>,
     /// The variables that were given a register.
     regs: HashMap<VarKey, Reg>,
+    /// Float variables that are also kept in a float register, and, once
+    /// they are declared, by the frame slot each one lives in. The slot
+    /// always holds the value too: a call may use the float registers for
+    /// something else, and they are loaded again after it.
+    float_regs: HashMap<VarKey, Xmm>,
+    in_xmm: HashMap<i32, Xmm>,
     /// Frame slots used so far.
     slots: i32,
     loops: Vec<Loop>,
@@ -658,6 +669,7 @@ impl<'a> Gen<'a> {
     fn call_runtime(&mut self, name: &str, drop: usize) {
         let label = self.function_label(name);
         self.asm.call(label);
+        self.reload_floats();
         if drop > 0 {
             self.asm.alu_imm(Alu::Add, RSP, 8 * drop as i32);
         }
@@ -893,6 +905,7 @@ impl<'a> Gen<'a> {
             self.asm.load(RAX, R15, CURRENT_TASK);
             self.asm.load(R10, RAX, TASK_CLOSURE);
             self.asm.call_mem(R10, FIELDS);
+        self.reload_floats();
             self.call_runtime("__rt_task_exit", 0);
             emitted = true;
         }
@@ -944,9 +957,26 @@ impl<'a> Gen<'a> {
             Some(&r) => Loc::Reg(r),
             None => {
                 self.slots += 1;
-                Loc::Frame(-8 * self.slots)
+                let offset = -8 * self.slots;
+                if let Some(&x) = self.float_regs.get(&key) {
+                    self.in_xmm.insert(offset, x);
+                }
+                Loc::Frame(offset)
             }
         }
+    }
+
+    /// If `e` is a float field of a struct held by a local variable: the
+    /// register that holds the struct (loaded into `scratch` if need be)
+    /// and the offset of the field, to compute with it where it is.
+    fn float_field(&mut self, e: &Expr, scratch: Reg) -> Option<(Reg, i32)> {
+        let ExprKind::Field { obj, name, .. } = &e.kind else { return None };
+        if self.ty(e) != Type::Float {
+            return None;
+        }
+        let var = self.local(obj)?;
+        let offset = self.field_offset(obj, name)?;
+        Some((self.object_reg(var.loc, scratch), offset))
     }
 
     fn declare(&mut self, name: &str, key: VarKey, ty: &Type) -> Loc {
@@ -967,8 +997,23 @@ impl<'a> Gen<'a> {
     fn store_loc(&mut self, loc: Loc, src: Reg) {
         match loc {
             Loc::Reg(r) => self.asm.mov(r, src),
-            Loc::Frame(offset) => self.asm.store(RBP, offset, src),
+            Loc::Frame(offset) => {
+                self.asm.store(RBP, offset, src);
+                if let Some(&x) = self.in_xmm.get(&offset) {
+                    self.asm.movq_in(x, src);
+                }
+            }
             Loc::Global(offset) => self.asm.store(R15, offset, src),
+        }
+    }
+
+    /// After a call: the float registers may have been used for something
+    /// else, so the variables kept in them are read again from their slots.
+    fn reload_floats(&mut self) {
+        let mut kept: Vec<(i32, Xmm)> = self.in_xmm.iter().map(|(offset, x)| (*offset, *x)).collect();
+        kept.sort();
+        for (offset, x) in kept {
+            self.asm.sse_load(Sse::Mov, x, RBP, offset);
         }
     }
 
@@ -1009,6 +1054,16 @@ impl<'a> Gen<'a> {
 
     /// Evaluates `e`, an integer or a boolean, straight into a variable.
     fn expr_into(&mut self, e: &Expr, loc: Loc) {
+        if let Loc::Frame(offset) = loc {
+            if let Some(&x) = self.in_xmm.get(&offset) {
+                // A float variable with a register: computed there, and
+                // written to its slot as well.
+                self.float(e);
+                self.asm.sse(Sse::Mov, x, XMM0);
+                self.asm.sse_store(RBP, offset, XMM0);
+                return;
+            }
+        }
         match (loc, self.simple(e)) {
             (Loc::Reg(r), Some(operand)) => self.load_operand(r, operand),
             (Loc::Frame(offset), Some(Operand::Imm(v))) => self.asm.store_imm(RBP, offset, v as i32),
@@ -1134,8 +1189,10 @@ impl<'a> Gen<'a> {
         self.check_type(&ret, span);
         self.fallible = fallible;
 
-        let names: Vec<(String, VarKey)> = params.iter().map(|p| (p.name.clone(), p.key)).collect();
-        let plan = plan::plan(body, &names, &VARIABLE_REGS);
+        let names: Vec<(String, VarKey, bool)> = params.iter().map(|p| (p.name.clone(), p.key, p.ty == Type::Float)).collect();
+        let plan = plan::plan(body, &names, &VARIABLE_REGS, &FLOAT_REGS, &self.an.types);
+        self.float_regs = plan.floats;
+        self.in_xmm.clear();
         let mut saved: Vec<Reg> = plan.regs.values().copied().collect();
         saved.sort();
         self.regs = plan.regs;
@@ -1191,6 +1248,10 @@ impl<'a> Gen<'a> {
                 self.load_loc(RAX, loc);
                 self.retain(RAX);
             }
+            if let (Loc::Frame(offset), Some(&x)) = (loc, self.float_regs.get(&p.key)) {
+                self.in_xmm.insert(offset, x);
+                self.asm.sse_load(Sse::Mov, x, RBP, offset);
+            }
             scope.push(Var { name: p.name.clone(), loc, is_ref: reference, owned });
         }
         self.scopes = vec![scope];
@@ -1218,6 +1279,8 @@ impl<'a> Gen<'a> {
         self.asm.patch32(frame_size_at, self.slots * 8);
         self.scopes.clear();
         self.regs.clear();
+        self.float_regs.clear();
+        self.in_xmm.clear();
     }
 
     // ---- statements ----
@@ -2846,6 +2909,7 @@ impl<'a> Gen<'a> {
                 let owned: Vec<bool> = args.iter().map(|a| self.push_arg(a)).collect();
                 let label = self.function_label(&name);
                 self.asm.call(label);
+        self.reload_floats();
                 self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
                 if self.an.async_keys.contains(&crate::checker::fn_key(&name)) {
@@ -2859,6 +2923,7 @@ impl<'a> Gen<'a> {
                 owned.extend(args.iter().map(|a| self.push_arg(a)));
                 let label = self.function_label(&method_key(&strukt, &name));
                 self.asm.call(label);
+        self.reload_floats();
                 self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
                 if self.an.async_keys.contains(&method_key(&strukt, &name)) {
@@ -2872,6 +2937,7 @@ impl<'a> Gen<'a> {
                 owned.extend(args.iter().map(|a| self.push_arg(a)));
                 self.asm.load(R10, RSP, 8 * args.len() as i32);
                 self.asm.call_mem(R10, FIELDS);
+        self.reload_floats();
                 self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
                 self.yield_point();
@@ -2927,6 +2993,7 @@ impl<'a> Gen<'a> {
         self.asm.alu_load(Alu::Cmp, RCX, R15, cache);
         let miss = self.asm.jcc_short(Cc::Ne);
         self.asm.call_mem(R15, cache + 8);
+        self.reload_floats();
         let done = self.asm.jmp_short();
         self.asm.bind_short(miss);
         self.asm.store(R15, cache, RCX);
@@ -2937,6 +3004,7 @@ impl<'a> Gen<'a> {
         self.call_runtime("__rt_find_method", 2);
         self.asm.store(R15, cache + 8, RAX);
         self.asm.call_reg(RAX);
+        self.reload_floats();
         self.asm.bind_short(done);
     }
 
@@ -3086,7 +3154,10 @@ impl<'a> Gen<'a> {
     fn float_load(&mut self, dst: Xmm, loc: Loc) {
         match loc {
             Loc::Reg(r) => self.asm.movq_in(dst, r),
-            Loc::Frame(offset) => self.asm.sse_load(Sse::Mov, dst, RBP, offset),
+            Loc::Frame(offset) => match self.in_xmm.get(&offset) {
+                Some(&x) => self.asm.sse(Sse::Mov, dst, x),
+                None => self.asm.sse_load(Sse::Mov, dst, RBP, offset),
+            },
             Loc::Global(offset) => self.asm.sse_load(Sse::Mov, dst, R15, offset),
         }
     }
@@ -3132,7 +3203,8 @@ impl<'a> Gen<'a> {
                 // computation that runs no code of the program, the right
                 // side goes first: nothing has to wait on the stack.
                 let leaf = matches!(lhs.kind, ExprKind::Ident(_) | ExprKind::Float(_) | ExprKind::Field { .. } | ExprKind::Index { .. });
-                if leaf && self.simple(rhs).is_none() && !matches!(rhs.kind, ExprKind::Float(_)) && self.is_pure(lhs) && self.is_pure(rhs) {
+                let direct = matches!(&rhs.kind, ExprKind::Field { obj, .. } if self.local(obj).is_some());
+                if leaf && !direct && self.simple(rhs).is_none() && !matches!(rhs.kind, ExprKind::Float(_)) && self.is_pure(lhs) && self.is_pure(rhs) {
                     self.float(rhs);
                     self.asm.sse(Sse::Mov, XMM1, XMM0);
                     self.float(lhs);
@@ -3140,12 +3212,19 @@ impl<'a> Gen<'a> {
                     return;
                 }
                 self.float(lhs);
+                if let Some((base, offset)) = self.float_field(rhs, RCX) {
+                    self.asm.sse_load(op, XMM0, base, offset);
+                    return;
+                }
                 match (self.simple(rhs), &rhs.kind) {
                     (Some(Operand::At(Loc::Reg(r))), _) => {
                         self.asm.movq_in(XMM1, r);
                         self.asm.sse(op, XMM0, XMM1);
                     }
-                    (Some(Operand::At(Loc::Frame(offset))), _) => self.asm.sse_load(op, XMM0, RBP, offset),
+                    (Some(Operand::At(Loc::Frame(offset))), _) => match self.in_xmm.get(&offset) {
+                        Some(&x) => self.asm.sse(op, XMM0, x),
+                        None => self.asm.sse_load(op, XMM0, RBP, offset),
+                    },
                     (Some(Operand::At(Loc::Global(offset))), _) => self.asm.sse_load(op, XMM0, R15, offset),
                     (_, ExprKind::Float(x)) => {
                         self.asm.mov_imm(RAX, x.to_bits() as i64);
@@ -3178,16 +3257,61 @@ impl<'a> Gen<'a> {
             },
             _ => match self.simple(e) {
                 Some(Operand::At(loc)) => self.float_load(XMM0, loc),
-                _ => {
-                    self.expr(e);
-                    self.asm.movq_in(XMM0, RAX);
-                }
+                _ => match self.float_field(e, RCX) {
+                    Some((base, offset)) => self.asm.sse_load(Sse::Mov, XMM0, base, offset),
+                    None => {
+                        self.expr(e);
+                        self.asm.movq_in(XMM0, RAX);
+                    }
+                },
             },
+        }
+    }
+
+    /// `dst = dst op e`, when `e` is a variable or a field that can be used
+    /// where it is. Returns false, having done nothing, when it is not.
+    fn float_apply(&mut self, op: Sse, dst: Xmm, e: &Expr) -> bool {
+        match self.simple(e) {
+            Some(Operand::At(Loc::Frame(offset))) => match self.in_xmm.get(&offset) {
+                Some(&x) => self.asm.sse(op, dst, x),
+                None => self.asm.sse_load(op, dst, RBP, offset),
+            },
+            Some(Operand::At(Loc::Global(offset))) => self.asm.sse_load(op, dst, R15, offset),
+            Some(_) => return false,
+            None => match self.float_field(e, RCX) {
+                Some((base, offset)) => self.asm.sse_load(op, dst, base, offset),
+                None => return false,
+            },
+        }
+        true
+    }
+
+    /// Whether `float_apply` can use `e`.
+    fn float_direct(&self, e: &Expr) -> bool {
+        match self.simple(e) {
+            Some(Operand::At(Loc::Frame(_) | Loc::Global(_))) => true,
+            Some(_) => false,
+            None => matches!(&e.kind, ExprKind::Field { obj, name, .. }
+                if self.ty(e) == Type::Float && self.local(obj).is_some() && self.field_offset(obj, name).is_some()),
         }
     }
 
     /// With a first operand in XMM0: evaluates `e` into XMM1, keeping XMM0.
     fn float_second(&mut self, e: &Expr) {
+        // `x * y`, with both at hand, is computed in XMM1 directly.
+        if let ExprKind::Binary { op: op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div), lhs, rhs } = &e.kind {
+            if self.ty(e) == Type::Float && self.float_direct(lhs) && self.float_direct(rhs) {
+                let op = match op {
+                    BinOp::Add => Sse::Add,
+                    BinOp::Sub => Sse::Sub,
+                    BinOp::Mul => Sse::Mul,
+                    _ => Sse::Div,
+                };
+                self.float_apply(Sse::Mov, XMM1, lhs);
+                self.float_apply(op, XMM1, rhs);
+                return;
+            }
+        }
         match (self.simple(e), &e.kind) {
             (Some(Operand::At(loc)), _) => self.float_load(XMM1, loc),
             (_, ExprKind::Float(x)) => {
@@ -3751,6 +3875,7 @@ impl<'a> Gen<'a> {
                 self.asm.push(RAX);
                 self.asm.load(R10, RSP, 8);
                 self.asm.call_mem(R10, FIELDS);
+        self.reload_floats();
                 self.asm.alu_imm(Alu::Add, RSP, 16);
             }
             "__yield" => self.yield_point(),
@@ -3764,6 +3889,7 @@ impl<'a> Gen<'a> {
                     self.switch = Some(self.asm.new_label());
                 }
                 self.asm.call(self.switch.unwrap());
+        self.reload_floats();
             }
             "__fault_entry" => {
                 if self.fault_entry.is_none() {

@@ -22,20 +22,20 @@ Numbers move by a few percent from run to run.
 
 | Program | What it stresses | Native | Node | Native executable |
 | --- | --- | ---: | ---: | ---: |
-| `alloc` | 9 million short-lived objects | 177 ms | 129 ms | 6.0 KB |
-| `closures` | 3 million calls through function values; `map`, `filter`, `sort_by` | 24 ms | 355 ms | 10.3 KB |
-| `collatz` | branches, division, multiplication | 392 ms | 1590 ms | 3.6 KB |
-| `fib` | 39 million recursive calls | 300 ms | 384 ms | 3.4 KB |
-| `loops` | nested loops, `%` by a constant | 242 ms | 295 ms | 3.5 KB |
-| `maps` | a million insertions, two million lookups | 170 ms | 339 ms | 16.0 KB |
-| `nbody` | float arithmetic and square roots | 105 ms | 51 ms | 13.1 KB |
-| `print` | 500 000 lines of output | 20 ms | 563 ms | 3.4 KB |
-| `shapes` | 5 million calls through an interface | 21 ms | 410 ms | 5.6 KB |
-| `sieve` | list reads and writes | 112 ms | 250 ms | 5.8 KB |
-| `sort` | sorting a million integers | 174 ms | 559 ms | 7.7 KB |
-| `strings` | building a long string, comparing | 15 ms | 46 ms | 6.1 KB |
-| `tasks` | 200 000 messages through a chain of 100 tasks | 10 ms | 71 ms | 9.9 KB |
-| `structs` | 5 million method calls on structs | 15 ms | 48 ms | 5.4 KB |
+| `alloc` | 9 million short-lived objects | 176 ms | 170 ms | 8.2 KB |
+| `closures` | 3 million calls through function values; `map`, `filter`, `sort_by` | 26 ms | 380 ms | 12.3 KB |
+| `collatz` | branches, division, multiplication | 360 ms | 1465 ms | 5.5 KB |
+| `fib` | 39 million recursive calls | 285 ms | 438 ms | 5.3 KB |
+| `loops` | nested loops, `%` by a constant | 206 ms | 328 ms | 5.4 KB |
+| `maps` | a million insertions, two million lookups | 196 ms | 381 ms | 17.4 KB |
+| `nbody` | float arithmetic and square roots | 17 ms | 53 ms | 14.9 KB |
+| `print` | 500 000 lines of output | 23 ms | 493 ms | 5.4 KB |
+| `shapes` | 5 million calls through an interface | 22 ms | 413 ms | 7.5 KB |
+| `sieve` | list reads and writes | 116 ms | 306 ms | 8.1 KB |
+| `sort` | sorting a million integers | 160 ms | 460 ms | 9.6 KB |
+| `strings` | building a long string, comparing | 13 ms | 43 ms | 7.8 KB |
+| `tasks` | 200 000 messages through a chain of 100 tasks | 12 ms | 78 ms | 11.8 KB |
+| `structs` | 5 million method calls on structs | 15 ms | 44 ms | 7.3 KB |
 
 Peak memory of the same runs:
 
@@ -55,10 +55,12 @@ Things to keep in mind when reading these:
 - `shapes` and `closures` are slow on JavaScript because of how Onyx
   compiles calls through an interface or a function value there (each one
   is awaited), not because of Node.js itself.
-- Node.js is ahead on two programs. On `alloc`, its engine can avoid
-  creating objects that never leave a loop. On `nbody`, it keeps floats in
-  processor registers from one statement to the next, while Onyx stores each
-  variable back to memory; float variables in registers are on the roadmap.
+- `alloc` is the one program where the two are level: the JavaScript
+  engine can avoid creating objects that never leave a loop.
+- `nbody` went from 105 ms to 17 ms when float variables moved into
+  registers; most of that came from one instruction, the copy between two
+  float registers, which had been making each result wait for an unrelated
+  earlier one.
 
 ## History
 
@@ -78,5 +80,7 @@ described in [`docs/native.md`](../docs/native.md):
 | `strings` | 5280 ms | 16 ms |
 | `structs` | 57 ms | 15 ms |
 
-Executables went from about 20 KB to between 3 and 7 KB. (The "after" column
+Executables went from about 20 KB to between 3 and 7 KB at the time; they
+have grown by about 2 KB since, with the code that reports stack overflows
+and looks after weak references. (The "after" column
 is the measurement made at the time; the table above is more recent.)

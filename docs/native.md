@@ -17,7 +17,7 @@ onyx build --target native hello.ox
 ./build/hello
 ```
 
-A hello-world executable is about 3.4 KB: only the functions a program
+A hello-world executable is about 4.7 KB: only the functions a program
 really uses, the runtime's included, end up in it.
 
 ## Status: experimental
@@ -78,8 +78,6 @@ Known gaps in what is supported:
   operation, and the text of floats, is identical.
 - Converting a float that is not a number, or too big for an `int`, with
   `int`, `floor`, `ceil` or `round` gives an unspecified int.
-- A float variable is stored in memory after every statement; computations
-  inside one expression stay in the processor's float registers.
 - Tasks take turns on one thread, as on the JavaScript target: they overlap
   while they wait, not while they compute.
 - When a task panics, the program stops at once. On the JavaScript target
@@ -217,8 +215,11 @@ In the native code generator (`src/native/mod.rs`, `src/native/plan.rs`):
   as a value, is a constant: making it allocates nothing. A captured
   variable is copied into the closure; only one that is assigned to after
   being captured moves into a shared box.
-- **Floats.** An expression such as `a * b + c * d` is computed in the
-  SSE registers from start to end. Converting an int happens where the
+- **Floats.** The six most used float variables of a function live in SSE
+  registers, like the integer ones live in general registers (their value
+  is also kept in memory, from where the registers are filled again after a
+  call). An expression such as `a * b + c * d` is computed there from start
+  to end, and a float field of a struct is used where it is. Converting an int happens where the
   checker saw one used as a float, and a literal such as the 2 of `2 * x` is
   converted when the program is compiled.
 - **Lists.** Reading an element is a bounds check and a load; `push` stores
@@ -363,7 +364,6 @@ They were compared with Node.js on tens of thousands of random floats.
 
 ## Roadmap for this target
 
-1. Float variables in registers
-2. `fetch`
-3. Tasks on several threads
-4. Other systems (ARM64, Windows, macOS)
+1. `fetch`
+2. Tasks on several threads
+3. Other systems (ARM64, Windows, macOS)

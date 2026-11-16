@@ -5,8 +5,9 @@
 //! times more for each level of nesting. The most used variables get the
 //! registers; the others stay in the function's stack frame.
 
-use super::asm::Reg;
+use super::asm::{Reg, Xmm};
 use crate::ast::*;
+use crate::checker::Type;
 use std::collections::{HashMap, HashSet};
 
 /// Identifies a variable of a function: where it is declared in the source,
@@ -21,6 +22,8 @@ pub const SUBJECT: u8 = 2;
 
 pub struct Plan {
     pub regs: HashMap<VarKey, Reg>,
+    /// Float variables that are also kept in a float register.
+    pub floats: HashMap<VarKey, Xmm>,
     /// Variables that are assigned to after their declaration.
     pub assigned: HashSet<VarKey>,
 }
@@ -30,20 +33,32 @@ struct Candidate {
     weight: u64,
     is_param: bool,
     assigned: bool,
+    float: bool,
 }
 
-struct Planner {
+struct Planner<'a> {
+    types: &'a HashMap<usize, Type>,
     scopes: Vec<HashMap<String, usize>>,
     vars: Vec<Candidate>,
     /// What one use is worth at the current loop depth.
     weight: u64,
 }
 
-pub fn plan(body: &Block, params: &[(String, VarKey)], registers: &[Reg]) -> Plan {
-    let mut p = Planner { scopes: vec![HashMap::new()], vars: Vec::new(), weight: 1 };
-    for (name, key) in params {
+/// `params`: name, key and whether it is a float. `types`: the types of the
+/// program's expressions, which tell the float variables from the others.
+pub fn plan(
+    body: &Block,
+    params: &[(String, VarKey, bool)],
+    registers: &[Reg],
+    float_registers: &[Xmm],
+    types: &HashMap<usize, Type>,
+) -> Plan {
+    let mut p = Planner { types, scopes: vec![HashMap::new()], vars: Vec::new(), weight: 1 };
+    for (name, key, float) in params {
         p.declare(Some(name), *key, 0);
-        p.vars.last_mut().unwrap().is_param = true;
+        let var = p.vars.last_mut().unwrap();
+        var.is_param = true;
+        var.float = *float;
     }
     for stmt in &body.stmts {
         p.stmt(stmt);
@@ -52,17 +67,21 @@ pub fn plan(body: &Block, params: &[(String, VarKey)], registers: &[Reg]) -> Pla
     // A register has to be saved and restored by the function, and a parameter
     // has to be loaded into it: it only pays off for variables used a few times.
     let mut candidates: Vec<&Candidate> =
-        p.vars.iter().filter(|v| v.weight >= if v.is_param { 4 } else { 3 }).collect();
+        p.vars.iter().filter(|v| !v.float && v.weight >= if v.is_param { 4 } else { 3 }).collect();
     candidates.sort_by(|a, b| b.weight.cmp(&a.weight));
+    // Floats are computed in registers of their own.
+    let mut floats: Vec<&Candidate> = p.vars.iter().filter(|v| v.float && v.weight >= 3).collect();
+    floats.sort_by(|a, b| b.weight.cmp(&a.weight));
     Plan {
+        floats: floats.iter().zip(float_registers).map(|(v, r)| (v.key, *r)).collect(),
         regs: candidates.iter().zip(registers).map(|(v, r)| (v.key, *r)).collect(),
         assigned: p.vars.iter().filter(|v| v.assigned).map(|v| v.key).collect(),
     }
 }
 
-impl Planner {
+impl<'a> Planner<'a> {
     fn declare(&mut self, name: Option<&str>, key: VarKey, uses: u64) {
-        self.vars.push(Candidate { key, weight: uses * self.weight, is_param: false, assigned: false });
+        self.vars.push(Candidate { key, weight: uses * self.weight, is_param: false, assigned: false, float: false });
         if let Some(name) = name {
             self.scopes.last_mut().unwrap().insert(name.to_string(), self.vars.len() - 1);
         }
@@ -95,6 +114,7 @@ impl Planner {
             StmtKind::Let { name, name_span, init, .. } => {
                 self.expr(init);
                 self.declare(Some(name), (name_span.start, NAMED), 1);
+                self.vars.last_mut().unwrap().float = self.types.get(&init.id) == Some(&Type::Float);
             }
             StmtKind::Assign { target, value, .. } => {
                 match &target.kind {
