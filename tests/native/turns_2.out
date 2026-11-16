@@ -1,0 +1,14 @@
+T1.0
+T0.1
+T0 len true
+T1 got 22
+T2 half 10
+T2.1
+T2.2
+T3 get 14
+M half -1
+M half 21
+M.2
+M.4
+M got 43
+main done

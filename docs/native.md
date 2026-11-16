@@ -48,11 +48,12 @@ The native target is being built up step by step. It currently supports:
   the methods `len`, `upper`, `lower`, `trim`, `contains`, `starts_with`,
   `ends_with`, `index_of`, `slice`, `replace`, `split`, `chars`, `repeat`
 - `print`, `str`, `parse_int`, `abs`, `min`, `max`, `exit`, `panic`
+- `fork`, channels (`chan<T>()`, `ch <- v`, `<-ch`, `close`, `for v in ch`)
 - the outside world: `read_file`, `write_file`, `append_file`,
   `file_exists`, `args`, `env`, `input`, `now`, `sleep`
 - modules (`import`)
 
-Anything else (`fork`, channels, `fetch`) is rejected with error
+The one thing left out is `fetch`, which is rejected with error
 `E0500` rather than compiled incorrectly. Those programs still run on the
 default JavaScript target. Functions that are never called are not compiled,
 so an unsupported feature in unused code does not get in the way.
@@ -78,6 +79,11 @@ Known gaps in what is supported:
   `int`, `floor`, `ceil` or `round` gives an unspecified int.
 - A float variable is stored in memory after every statement; computations
   inside one expression stay in the processor's float registers.
+- Tasks take turns on one thread, as on the JavaScript target: they overlap
+  while they wait, not while they compute.
+- When a task panics, the program stops at once. On the JavaScript target
+  the other tasks may still print a line or two before it does.
+- A task has a stack of 256 KB.
 - A file is read as it is: bytes that are not valid UTF-8 are kept, where
   the JavaScript target replaces them.
 - Adding or removing keys of a map inside a `for` loop over that same map
@@ -208,7 +214,7 @@ last stage differs.
 | File | Role |
 | --- | --- |
 | `src/native/widen.rs` | Makes conversions from `int` to `float` explicit |
-| `src/native/capture.rs` | Finds what each lambda captures; boxes the variables they share |
+| `src/native/capture.rs` | Finds what each lambda and `fork` block captures; boxes the variables they share |
 | `src/native/lower.rs` | Rewrites statements so that every `?` stands on its own |
 | `src/native/mod.rs` | Walks the checked program and emits machine code |
 | `src/native/plan.rs` | Chooses the variables that live in registers |
@@ -264,6 +270,29 @@ the stack, where the kernel puts them when a program starts. Input is read
 4096 bytes at a time, so reading a large file line by line with `input`
 stays fast.
 
+## Tasks
+
+`fork { ... }` starts a task: the block, compiled like a lambda, runs on a
+stack of its own (256 KB, taken from the system when the task starts and
+given back when it ends). All tasks share the one thread of the program and
+take turns. Switching from one to another is saving seven registers and the
+stack pointer, and loading those of the other: about twenty instructions,
+with no call to the kernel.
+
+A task runs until it has to wait: for a value on a channel, for room in
+one, for `sleep`. It then stands in a line (of the channel, of the
+sleepers) and the next task that is ready goes on. When nothing is ready,
+the program sleeps until the first sleeper's time; when nothing ever will
+be, it stops with the `deadlock` message.
+
+The scheduler, the channels and the timers are written in Onyx in the
+runtime (`runtime.ox`, "tasks" and "channels"). The order in which tasks
+take turns is exactly the one of the JavaScript target, so that a program
+prints the same thing on both: it was compared on hundreds of generated
+programs.
+
+A program without `fork` contains none of this, and pays nothing for it.
+
 ## Tests
 
 `onyx test --target native` builds a program that calls every `check` block
@@ -297,8 +326,8 @@ They were compared with Node.js on tens of thousands of random floats.
 
 ## Roadmap for this target
 
-1. `fork` and channels
-2. Weak references, to break cycles
-3. Float variables in registers
-4. `fetch`
+1. Weak references, to break cycles
+2. Float variables in registers
+3. `fetch`
+4. Tasks on several threads
 5. Other systems (ARM64, Windows, macOS)

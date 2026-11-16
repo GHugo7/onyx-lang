@@ -34,6 +34,7 @@ Numbers move by a few percent from run to run.
 | `sieve` | list reads and writes | 112 ms | 250 ms | 5.8 KB |
 | `sort` | sorting a million integers | 174 ms | 559 ms | 7.7 KB |
 | `strings` | building a long string, comparing | 15 ms | 46 ms | 6.1 KB |
+| `tasks` | 200 000 messages through a chain of 100 tasks | 10 ms | 71 ms | 9.9 KB |
 | `structs` | 5 million method calls on structs | 15 ms | 48 ms | 5.4 KB |
 
 Peak memory of the same runs:

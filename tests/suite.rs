@@ -251,7 +251,7 @@ mod native {
 
     #[test]
     fn unsupported_features_are_reported_not_miscompiled() {
-        let out = run_source("fork.ox", "fn main() {\n    fork {\n        print(1)\n    }\n}\n");
+        let out = run_source("fetch.ox", "fn main() {\n    print(fetch(\"http://localhost\") or \"\")\n}\n");
         assert_eq!(out.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&out.stderr).contains("error[E0500]"));
     }
@@ -308,6 +308,29 @@ mod native {
         assert!(outputs[1].contains("hello Ada, next year you are 37"), "{}", outputs[1]);
         assert!(outputs[1].contains("[\"b\", \"c d\"] true"), "{}", outputs[1]);
         assert_eq!(outputs[0], outputs[1]);
+    }
+
+    /// A program whose tasks all wait on each other stops with a message,
+    /// the same on both targets; one whose `main` ends while a task still
+    /// waits simply ends.
+    #[test]
+    fn deadlocks_are_reported() {
+        let stuck = "fn main() {\n    var ch = chan<int>()\n    fork {\n        print(\"task waits\")\n        print(<-ch)\n    }\n    print(\"main waits too\")\n    var other = chan<int>()\n    print(<-other)\n}\n";
+        let out = run_source("stuck.ox", stuck);
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "task waits\nmain waits too\n");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "fatal: deadlock: the program is waiting on a channel that nobody will ever use\n"
+        );
+        let left = "fn main() {\n    var ch = chan<int>()\n    fork {\n        print(<-ch)\n    }\n    print(\"done\")\n}\n";
+        let out = run_source("left.ox", left);
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "done\n");
+        let closed = "fn main() {\n    var ch = chan<int>()\n    ch.close()\n    ch <- 1\n}\n";
+        let out = run_source("closed.ox", closed);
+        assert_eq!(out.status.code(), Some(2));
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "panic: send on a closed channel\n");
     }
 
     #[test]

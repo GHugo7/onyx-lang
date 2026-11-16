@@ -63,6 +63,13 @@ const FIELDS: i32 = 8;
 /// and the address to come back to when a check is abandoned.
 const TEST_STACK: i32 = 1152;
 const TEST_RESUME: i32 = 1160;
+/// In the runtime's state: the running task, the first task that is ready
+/// to go on, and whether the last receive from a channel got a value.
+const CURRENT_TASK: i32 = 1184;
+const READY_TASKS: i32 = 1200;
+const CHAN_OK: i32 = 1240;
+/// In a task: the function it runs.
+const TASK_CLOSURE: i32 = 32;
 
 /// Stack space in which the runtime writes the text of a number (see
 /// `__rt_int_into` in runtime.ox).
@@ -105,6 +112,8 @@ pub fn generate(
         caches: 0,
         div_zero: None,
         index_oob: None,
+        switch: None,
+        task_entry: None,
         scopes: Vec::new(),
         regs: HashMap::new(),
         slots: 0,
@@ -252,6 +261,10 @@ pub fn generate(
             g.asm.bind_short(fine);
         }
     }
+    if an.has_forks {
+        // `main` is done; the tasks it started may not be.
+        g.call_runtime("__rt_finish", 0);
+    }
     if leak_check && tests.is_none() {
         for name in global_order.iter().rev() {
             let (offset, ty) = g.globals[name].clone();
@@ -287,7 +300,10 @@ pub fn generate(
 }
 
 fn is_ref(ty: &Type) -> bool {
-    matches!(ty, Type::Str | Type::Error | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Interface(_) | Type::Fn(_))
+    matches!(
+        ty,
+        Type::Str | Type::Error | Type::List(_) | Type::Map(..) | Type::Struct(_) | Type::Interface(_) | Type::Fn(_) | Type::Chan(_)
+    )
 }
 
 fn supported(ty: &Type) -> bool {
@@ -295,9 +311,8 @@ fn supported(ty: &Type) -> bool {
         Type::Int | Type::Float | Type::Bool | Type::Str | Type::Error | Type::Void | Type::Range | Type::Unknown => true,
         Type::Struct(_) | Type::Interface(_) => true,
         Type::Fn(sig) => sig.params.iter().all(supported) && supported(&sig.ret),
-        Type::List(elem) => supported(elem),
+        Type::List(elem) | Type::Chan(elem) => supported(elem),
         Type::Map(key, value) => **key != Type::Float && supported(key) && supported(value),
-        _ => false,
     }
 }
 
@@ -571,6 +586,10 @@ struct Gen<'a> {
     /// Shared pieces of code that report an error and never return.
     div_zero: Option<Label>,
     index_oob: Option<Label>,
+    /// The code that passes the processor from one task to another, and the
+    /// code every task starts in.
+    switch: Option<Label>,
+    task_entry: Option<Label>,
 
     // ---- state of the function being compiled ----
     /// Local variables, innermost scope last.
@@ -677,6 +696,23 @@ impl<'a> Gen<'a> {
                     self.asm.bind(label);
                     self.asm.word(4);
                     self.asm.address(elem);
+                }
+                Type::Chan(elem) => {
+                    // Written like the descriptor of a struct with seven
+                    // fields, the third of which is the list of buffered
+                    // values, so that a channel is released like a struct.
+                    let name = self.string("chan");
+                    let int = self.descriptor(&Type::Int);
+                    let buffer = self.descriptor(&Type::List(elem.clone()));
+                    self.asm.bind(label);
+                    self.asm.word(10);
+                    self.asm.address(name);
+                    self.asm.word(7);
+                    self.asm.word(0);
+                    for field in 0..7 {
+                        self.asm.address(name);
+                        self.asm.address(if field == 2 { buffer } else { int });
+                    }
                 }
                 Type::Map(key, value) => {
                     let (key, value) = (self.descriptor(key), self.descriptor(value));
@@ -814,6 +850,34 @@ impl<'a> Gen<'a> {
             self.asm.lea(RAX, message);
             self.asm.push(RAX);
             self.call_runtime("__rt_panic", 0);
+            emitted = true;
+        }
+        if let Some(label) = self.switch.filter(|l| !self.asm.is_bound(*l)) {
+            // With RAX = where to note the stack pointer of the task that
+            // stops, RCX = the stack pointer of the one that goes on. What a
+            // function may rely on after a call is saved on the stack of
+            // the first and found again on the stack of the second, which
+            // returns to wherever it called this from.
+            self.asm.bind(label);
+            let saved = [RBP, RBX, R12, R13, R14, RSI, RDI];
+            for r in saved {
+                self.asm.push(r);
+            }
+            self.asm.store(RAX, 0, RSP);
+            self.asm.mov(RSP, RCX);
+            for r in saved.into_iter().rev() {
+                self.asm.pop(r);
+            }
+            self.asm.ret();
+            emitted = true;
+        }
+        if let Some(label) = self.task_entry.filter(|l| !self.asm.is_bound(*l)) {
+            // A new task: call its function, then leave for good.
+            self.asm.bind(label);
+            self.asm.load(RAX, R15, CURRENT_TASK);
+            self.asm.load(R10, RAX, TASK_CLOSURE);
+            self.asm.call_mem(R10, FIELDS);
+            self.call_runtime("__rt_task_exit", 0);
             emitted = true;
         }
         if let Some(label) = self.index_oob.filter(|l| !self.asm.is_bound(*l)) {
@@ -1238,7 +1302,8 @@ impl<'a> Gen<'a> {
                 Type::List(elem) => self.for_list(var, *var_span, iter, body, &elem),
                 Type::Map(key, _) => self.for_map(var, *var_span, iter, body, &key),
                 Type::Str => self.for_str(var, *var_span, iter, body),
-                _ => self.unsupported(iter.span, "loops over channels"),
+                Type::Chan(elem) => self.for_chan(var, *var_span, iter, body, &elem),
+                _ => self.unsupported(iter.span, "loops over this type"),
             },
             StmtKind::Return(Some(v)) if matches!(v.kind, ExprKind::Catch { .. }) => self.catch(v, Sink::Return),
             StmtKind::Return(value) => {
@@ -1280,7 +1345,14 @@ impl<'a> Gen<'a> {
             }
             StmtKind::Block(body) => self.block(body),
             StmtKind::Fork(_) => self.unsupported(stmt.span, "`fork` blocks"),
-            StmtKind::Send { .. } => self.unsupported(stmt.span, "channels"),
+            StmtKind::Send { chan, value } => {
+                // The value moves into the channel.
+                let owned = [self.push_arg(chan), false];
+                self.expr(value);
+                self.asm.push(RAX);
+                self.call_runtime("__rt_chan_send", 0);
+                self.drop_args(&owned, false);
+            }
         }
     }
 
@@ -2129,14 +2201,31 @@ impl<'a> Gen<'a> {
                 self.asm.bind(fine);
             }
             ExprKind::Or { expr: call, default } => {
+                // When either side waits, the JavaScript target goes through
+                // a helper that waits a few more turns; so do we.
+                let waits = self.an.has_forks && (self.awaits(call) || self.awaits(default));
                 self.expr(call);
-                let fine = self.asm.new_label();
+                let (fine, end) = (self.asm.new_label(), self.asm.new_label());
                 self.asm.test(RDX, RDX);
                 self.asm.jcc(Cc::E, fine);
                 self.asm.mov(RAX, RDX);
                 self.release_rax();
+                if waits {
+                    self.yield_point();
+                }
                 self.expr(default);
+                if waits {
+                    for _ in 0..3 {
+                        self.yield_point();
+                    }
+                }
+                self.asm.jmp(end);
                 self.asm.bind(fine);
+                if waits {
+                    self.yield_point();
+                    self.yield_point();
+                }
+                self.asm.bind(end);
             }
             ExprKind::Catch { .. } => self.unsupported(e.span, "this use of `catch`"),
             ExprKind::Range { .. } => self.unsupported(e.span, "ranges outside of a `for` loop"),
@@ -2190,7 +2279,21 @@ impl<'a> Gen<'a> {
                     self.asm.store(RAX, FIELDS + 8 + 8 * i as i32, RCX);
                 }
             }
-            ExprKind::Recv(_) | ExprKind::ChanNew { .. } => self.unsupported(e.span, "channels"),
+            ExprKind::Recv(chan) => {
+                let owned = [self.push_arg(chan)];
+                self.call_runtime("__rt_chan_recv", 0);
+                self.drop_args(&owned, true);
+            }
+            ExprKind::ChanNew { cap, .. } => {
+                let td = self.descriptor(&ty);
+                self.asm.lea(RAX, td);
+                self.asm.push(RAX);
+                match cap {
+                    Some(cap) => self.push_value(cap),
+                    None => self.asm.push_imm(0),
+                }
+                self.call_runtime("__rt_chan_new", 2);
+            }
         }
     }
 
@@ -2729,6 +2832,9 @@ impl<'a> Gen<'a> {
                 self.asm.call(label);
                 self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
+                if self.an.async_keys.contains(&crate::checker::fn_key(&name)) {
+                    self.yield_point();
+                }
             }
             Some(CallKind::Method(strukt, name)) => {
                 // `self` is the first argument.
@@ -2739,6 +2845,9 @@ impl<'a> Gen<'a> {
                 self.asm.call(label);
                 self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
+                if self.an.async_keys.contains(&method_key(&strukt, &name)) {
+                    self.yield_point();
+                }
             }
             Some(CallKind::Dynamic) if !matches!(&callee.kind, ExprKind::Field { obj, .. } if matches!(self.ty(obj), Type::Interface(_))) => {
                 // A call through a function value: the closure waits under
@@ -2749,6 +2858,7 @@ impl<'a> Gen<'a> {
                 self.asm.call_mem(R10, FIELDS);
                 self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
+                self.yield_point();
             }
             Some(CallKind::Dynamic) => {
                 let ExprKind::Field { obj, name, .. } = &callee.kind else { return };
@@ -2757,6 +2867,7 @@ impl<'a> Gen<'a> {
                 self.interface_call(name, args.len());
                 self.keep_error = fallible;
                 self.drop_args(&owned, has_result);
+                self.yield_point();
             }
             Some(CallKind::Builtin(name)) => self.builtin(&name, e, args),
             Some(CallKind::BuiltinMethod(Recv::Str, name)) => {
@@ -2770,6 +2881,12 @@ impl<'a> Gen<'a> {
             Some(CallKind::BuiltinMethod(Recv::Map, name)) => {
                 let ExprKind::Field { obj, .. } = &callee.kind else { return };
                 self.map_method(e, obj, &name, args);
+            }
+            Some(CallKind::BuiltinMethod(Recv::Chan, name)) if name == "close" => {
+                let ExprKind::Field { obj, .. } = &callee.kind else { return };
+                let owned = [self.push_arg(obj)];
+                self.call_runtime("__rt_chan_close", 0);
+                self.drop_args(&owned, false);
             }
             Some(CallKind::BuiltinMethod(_, name)) => {
                 self.unsupported(e.span, &format!("calls to the method `{name}`"));
@@ -3113,6 +3230,87 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// `for v in channel`: receives until the channel is closed and empty.
+    fn for_chan(&mut self, var: &str, var_span: Span, iter: &Expr, body: &Block, elem: &Type) {
+        let (top, next, end) = (self.asm.new_label(), self.asm.new_label(), self.asm.new_label());
+        self.scopes.push(Vec::new());
+        self.expr(iter);
+        let chan = self.declare("<channel>", (var_span.start, SUBJECT), &self.ty(iter));
+        self.store_loc(chan, RAX);
+
+        self.asm.bind(top);
+        self.load_loc(RAX, chan);
+        self.asm.push(RAX);
+        self.call_runtime("__rt_chan_take", 1);
+        self.asm.alu_store_imm(Alu::Cmp, R15, CHAN_OK, 0);
+        self.asm.jcc(Cc::E, end);
+
+        // Inner scope: the loop variable, released after each turn.
+        self.scopes.push(Vec::new());
+        let item = self.declare(var, (var_span.start, NAMED), elem);
+        self.store_loc(item, RAX);
+        let depth = self.scopes.len();
+        self.loops.push(Loop { next, end, continue_from: depth, break_from: depth - 1 });
+        self.block(body);
+        self.loops.pop();
+
+        self.asm.bind(next);
+        self.release_scopes(depth - 1);
+        self.scopes.pop();
+        self.asm.jmp(top);
+
+        self.asm.bind(end);
+        self.release_scopes(self.scopes.len() - 1);
+        self.scopes.pop();
+    }
+
+    /// Whether evaluating `e` lets other tasks run (in the JavaScript target:
+    /// whether it contains an `await`). Lambdas are functions of their own.
+    fn awaits(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Ident(_) | ExprKind::Lambda { .. } => false,
+            ExprKind::Recv(_) => true,
+            ExprKind::Call { callee, args } => {
+                let waits = match self.call_kind(e) {
+                    Some(CallKind::Fn(name)) => self.an.async_keys.contains(&crate::checker::fn_key(name)),
+                    Some(CallKind::Method(strukt, name)) => self.an.async_keys.contains(&method_key(strukt, name)),
+                    Some(CallKind::Dynamic) | None => true,
+                    Some(CallKind::Builtin(name)) => name == "sleep",
+                    Some(CallKind::BuiltinMethod(_, name)) => matches!(name.as_str(), "map" | "filter" | "sort_by"),
+                };
+                waits || self.awaits(callee) || args.iter().any(|a| self.awaits(a))
+            }
+            ExprKind::Str(parts) => parts.iter().any(|p| matches!(p, StrPart::Expr(inner) if self.awaits(inner))),
+            ExprKind::List(items) => items.iter().any(|i| self.awaits(i)),
+            ExprKind::Map(entries) => entries.iter().any(|(k, v)| self.awaits(k) || self.awaits(v)),
+            ExprKind::StructLit { fields, .. } => fields.iter().any(|f| self.awaits(&f.value)),
+            ExprKind::Unary { expr, .. } | ExprKind::Try(expr) | ExprKind::Catch { expr, .. } => self.awaits(expr),
+            ExprKind::Field { obj, .. } => self.awaits(obj),
+            ExprKind::Binary { lhs, rhs, .. } => self.awaits(lhs) || self.awaits(rhs),
+            ExprKind::Index { obj, index } => self.awaits(obj) || self.awaits(index),
+            ExprKind::Range { lo, hi } => self.awaits(lo) || self.awaits(hi),
+            ExprKind::Or { expr, default } => self.awaits(expr) || self.awaits(default),
+            ExprKind::ChanNew { cap, .. } => cap.as_ref().is_some_and(|c| self.awaits(c)),
+        }
+    }
+
+    /// Where the JavaScript target has an `await`: the tasks that are ready
+    /// get to run before this one goes on. Keeps RAX and RDX (a result, an
+    /// error). Costs nothing in a program without `fork`.
+    fn yield_point(&mut self) {
+        if !self.an.has_forks {
+            return;
+        }
+        self.asm.alu_store_imm(Alu::Cmp, R15, READY_TASKS, 0);
+        let alone = self.asm.jcc_short(Cc::E);
+        self.asm.push(RAX);
+        self.asm.push(RDX);
+        self.call_runtime("__rt_yield", 0);
+        self.asm.pop(RDX);
+        self.asm.pop(RAX);
+        self.asm.bind_short(alone);
+    }
+
     /// `for c in text`: one character per turn. The loop keeps a position in
     /// bytes, so that a text of any length is walked in a single pass.
     fn for_str(&mut self, var: &str, var_span: Span, iter: &Expr, body: &Block) {
@@ -3252,6 +3450,7 @@ impl<'a> Gen<'a> {
                 self.asm.push(RAX);
                 self.call_runtime(&format!("__rt_list_{name}"), 0);
                 self.drop_args(&owned, true);
+                self.yield_point();
             }
             _ => self.unsupported(e.span, &format!("calls to the list method `{name}`")),
         }
@@ -3346,7 +3545,14 @@ impl<'a> Gen<'a> {
             "file_exists" => self.call_rt("__rt_file_exists", &[Arg::Borrow(&args[0])], true),
             "input" => self.call_rt("__rt_input", &[Arg::Borrow(&args[0])], true),
             "now" => self.call_rt("__rt_now", &[], true),
+            "sleep" if self.an.has_forks => self.call_rt("__rt_task_sleep", &[Arg::Value(&args[0])], false),
             "sleep" => self.call_rt("__rt_sleep", &[Arg::Value(&args[0])], false),
+            "__fork" => {
+                // The closure belongs to the new task from here on.
+                self.expr(&args[0]);
+                self.asm.push(RAX);
+                self.call_runtime("__rt_fork", 1);
+            }
             "random" => self.call_rt("__rt_random", &[], true),
             "random_int" => self.call_rt("__rt_random_int", &[Arg::Value(&args[0]), Arg::Value(&args[1])], true),
             "abs" if self.ty(e) == Type::Float => {
@@ -3521,6 +3727,24 @@ impl<'a> Gen<'a> {
                 self.asm.load(R10, RSP, 8);
                 self.asm.call_mem(R10, FIELDS);
                 self.asm.alu_imm(Alu::Add, RSP, 16);
+            }
+            "__yield" => self.yield_point(),
+            "__switch" => {
+                self.expr(&args[0]);
+                self.asm.push(RAX);
+                self.expr(&args[1]);
+                self.asm.mov(RCX, RAX);
+                self.asm.pop(RAX);
+                if self.switch.is_none() {
+                    self.switch = Some(self.asm.new_label());
+                }
+                self.asm.call(self.switch.unwrap());
+            }
+            "__task_entry" => {
+                if self.task_entry.is_none() {
+                    self.task_entry = Some(self.asm.new_label());
+                }
+                self.asm.lea(RAX, self.task_entry.unwrap());
             }
             "__unwind" => {
                 self.asm.load(RSP, R15, TEST_STACK);

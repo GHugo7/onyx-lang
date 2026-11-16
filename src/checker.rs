@@ -130,6 +130,8 @@ pub struct Analysis {
     /// Filled in by the native target: for each lambda, the variables of the
     /// functions around it that it uses, with their types.
     pub captures: HashMap<usize, Vec<(String, Type)>>,
+    /// Filled in by the native target: the program starts tasks with `fork`.
+    pub has_forks: bool,
 }
 
 pub fn fn_key(name: &str) -> String {
@@ -174,7 +176,9 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "__copy" => (vec![Int, Int, Int], Void, false, false),
         "__and" | "__or" | "__xor" | "__shl" | "__shr" | "__sar" => (vec![Int, Int], Int, false, false),
         "__call1" => (vec![Int, Int], Int, false, false),
-        "__unwind" => (vec![], Void, false, false),
+        "__unwind" | "__yield" => (vec![], Void, false, false),
+        "__switch" => (vec![Int, Int], Void, false, false),
+        "__task_entry" => (vec![], Int, false, false),
         "__bits" => (vec![Float], Int, false, false),
         "__float" => (vec![Int], Float, false, false),
         "__state" => (vec![], Int, false, false),

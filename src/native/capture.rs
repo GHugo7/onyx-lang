@@ -29,7 +29,8 @@
 //! the code generator only has to copy values.
 
 use crate::ast::*;
-use crate::checker::{Analysis, StructInfo, Type};
+use crate::checker::{Analysis, CallKind, FnSig, StructInfo, Type};
+use std::rc::Rc;
 use crate::diagnostics::Span;
 use std::collections::{HashMap, HashSet};
 
@@ -39,7 +40,136 @@ type Key = (usize, bool);
 /// Variables made by this pass get positions past any real source.
 const BOX_POSITIONS: usize = usize::MAX / 4;
 
+/// A `fork` block is a lambda handed to the runtime, which runs it as a new
+/// task: `fork { body }` becomes `__fork(fn() { body })`. From here on it is
+/// treated like any other lambda (what it uses is captured, and shared with
+/// the function around it when it changes).
+struct Forks<'a> {
+    an: &'a mut Analysis,
+    next_id: usize,
+}
+
+impl<'a> Forks<'a> {
+    fn node(&mut self, kind: ExprKind, ty: Type, span: Span) -> Expr {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.an.types.insert(id, ty);
+        Expr { id, span, kind }
+    }
+
+    fn block(&mut self, block: &mut Block) {
+        for stmt in &mut block.stmts {
+            self.stmt(stmt);
+        }
+    }
+
+    fn stmt(&mut self, stmt: &mut Stmt) {
+        let span = stmt.span;
+        match &mut stmt.kind {
+            StmtKind::Fork(body) => {
+                self.block(body);
+                self.an.has_forks = true;
+                let body = std::mem::replace(body, Block { stmts: Vec::new(), span });
+                let sig = Rc::new(FnSig { params: Vec::new(), ret: Type::Void, fallible: false });
+                let task = self.node(ExprKind::Lambda { params: Vec::new(), ret: None, fallible: false, body }, Type::Fn(sig), span);
+                let callee = self.node(ExprKind::Ident("__fork".to_string()), Type::Unknown, span);
+                let call = self.node(ExprKind::Call { callee: Box::new(callee), args: vec![task] }, Type::Void, span);
+                self.an.calls.insert(call.id, CallKind::Builtin("__fork".to_string()));
+                stmt.kind = StmtKind::Expr(call);
+            }
+            StmtKind::Let { init: e, .. } | StmtKind::Expr(e) | StmtKind::Fail(e) | StmtKind::Return(Some(e)) => self.expr(e),
+            StmtKind::Return(None) | StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::Assign { target, value, .. } => {
+                self.expr(target);
+                self.expr(value);
+            }
+            StmtKind::If { cond, then, els } => {
+                self.expr(cond);
+                self.block(then);
+                if let Some(other) = els {
+                    self.stmt(other);
+                }
+            }
+            StmtKind::While { cond: e, body } | StmtKind::For { iter: e, body, .. } => {
+                self.expr(e);
+                self.block(body);
+            }
+            StmtKind::Block(body) => self.block(body),
+            StmtKind::Send { chan, value } => {
+                self.expr(chan);
+                self.expr(value);
+            }
+        }
+    }
+
+    /// Only looks for the blocks inside expressions: lambdas and `catch`.
+    fn expr(&mut self, e: &mut Expr) {
+        match &mut e.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Ident(_) => {}
+            ExprKind::Lambda { body, .. } => self.block(body),
+            ExprKind::Catch { expr, body, .. } => {
+                self.expr(expr);
+                self.block(body);
+            }
+            ExprKind::Str(parts) => {
+                for part in parts {
+                    if let StrPart::Expr(inner) = part {
+                        self.expr(inner);
+                    }
+                }
+            }
+            ExprKind::List(items) => items.iter_mut().for_each(|item| self.expr(item)),
+            ExprKind::Map(entries) => {
+                for (key, value) in entries {
+                    self.expr(key);
+                    self.expr(value);
+                }
+            }
+            ExprKind::StructLit { fields, .. } => fields.iter_mut().for_each(|f| self.expr(&mut f.value)),
+            ExprKind::Unary { expr, .. } | ExprKind::Try(expr) | ExprKind::Recv(expr) => self.expr(expr),
+            ExprKind::Field { obj, .. } => self.expr(obj),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            ExprKind::Index { obj, index } => {
+                self.expr(obj);
+                self.expr(index);
+            }
+            ExprKind::Range { lo, hi } => {
+                self.expr(lo);
+                self.expr(hi);
+            }
+            ExprKind::Call { callee, args } => {
+                self.expr(callee);
+                args.iter_mut().for_each(|arg| self.expr(arg));
+            }
+            ExprKind::Or { expr, default } => {
+                self.expr(expr);
+                self.expr(default);
+            }
+            ExprKind::ChanNew { cap, .. } => {
+                if let Some(cap) = cap {
+                    self.expr(cap);
+                }
+            }
+        }
+    }
+}
+
 pub fn capture(program: &mut Program, an: &mut Analysis) {
+    let next_id = an.types.keys().max().map_or(0, |id| id + 1);
+    let mut forks = Forks { an, next_id };
+    for item in &mut program.items {
+        match item {
+            Item::Fn(f) => forks.block(&mut f.body),
+            Item::Struct(s) => s.methods.iter_mut().for_each(|m| forks.block(&mut m.body)),
+            Item::Check { body, .. } => forks.block(body),
+            Item::Global(stmt) => forks.stmt(stmt),
+            _ => {}
+        }
+    }
+    let an = forks.an;
     let mut finder = Finder { an, scopes: Vec::new(), frames: Vec::new(), depth_of: HashMap::new(), assigned: HashSet::new(), captured: HashSet::new(), found: HashMap::new() };
     for item in &program.items {
         match item {

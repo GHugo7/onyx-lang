@@ -34,7 +34,9 @@ for what works today.
 7. **Lambdas and closures** (done), with `map`, `filter` and `sort_by`.
 8. **Files and input** (done): files, arguments, environment, keyboard and
    clock, through system calls.
-9. **The rest of the language** on the native target: `fork` and channels.
+9. **Tasks and channels** (done): `fork`, channels and `sleep`, with a
+   scheduler written in Onyx. The native target now covers the whole
+   language, except `fetch`.
 10. **Self-hosting**: the compiler rewritten in Onyx.
 
 ## Later

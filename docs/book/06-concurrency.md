@@ -71,7 +71,7 @@ fn main() {
   caller for `?`; handle errors inside it with `or` or `catch`.
 - If the program ends up waiting on a channel nobody will ever send to, it
   stops with a `deadlock` message instead of hanging.
-- On the JavaScript target, tasks take turns on one thread. They overlap while
+- On both targets, tasks take turns on one thread. They overlap while
   waiting (`sleep`, `fetch`, channels), which is what matters for I/O. Heavy
   computations do not run in parallel yet; the JVM target will use real
   threads.

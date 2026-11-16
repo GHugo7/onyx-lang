@@ -75,6 +75,13 @@ const __S_TIME = 1136      // 16 bytes for the kernel to write a time into
 const __S_TEST = 1152      // `onyx test`: the stack pointer to restore when a check is abandoned (0 otherwise)
 const __S_TEST_WHY = 1168  // why the current check was abandoned
 const __S_TEST_FAILED = 1176
+const __S_CURRENT = 1184   // the task that is running (0 until the first `fork`)
+const __S_MAIN = 1192      // the task of `main`
+const __S_READY = 1200     // first task waiting for its turn, and at +8 the last one
+const __S_TIMERS = 1216    // sleeping tasks, the first to wake up first
+const __S_ZOMBIE = 1224    // a finished task whose stack is still to be given back
+const __S_MAIN_DONE = 1232 // `main` has returned
+const __S_CHAN_OK = 1240   // whether the last receive got a value (0: the channel was closed)
 
 const __SMALL = 1024       // blocks up to this size come from chunks
 const __CHUNK = 1048576
@@ -2144,6 +2151,9 @@ fn __rt_repr(v: int, td: int, quoted: bool) -> string {
     if kind == 9 {
         return "fn"
     }
+    if kind == 10 {
+        return "chan"
+    }
     if kind == __KIND_LIST {
         var elem = __load64(td + 8)
         var count = __load64(v + 8)
@@ -2207,7 +2217,7 @@ fn __rt_eq(a: int, b: int, td: int) -> bool {
         // Not the same as equal bits: 0.0 equals -0.0, and NaN equals nothing.
         return __float(a) == __float(b)
     }
-    if kind < 3 || a == b {
+    if kind < 3 || kind == 10 || a == b {
         return a == b
     }
     if kind == __KIND_STRING {
@@ -2785,7 +2795,9 @@ fn __rt_list_map(list: int, f: int, td: int) -> int {
         if refs {
             __rt_retain(item)
         }
-        __rt_list_push(out, __call1(f, item))
+        var mapped = __call1(f, item)
+        __yield()
+        __rt_list_push(out, mapped)
         if refs {
             __rt_release(item)
         }
@@ -2803,7 +2815,9 @@ fn __rt_list_filter(list: int, f: int, td: int) -> int {
         if refs {
             __rt_retain(item)
         }
-        if __call1(f, item) != 0 {
+        var keep = __call1(f, item) != 0
+        __yield()
+        if keep {
             __rt_list_push(out, item)
         } else if refs {
             __rt_release(item)
@@ -2840,7 +2854,9 @@ fn __rt_list_sort_by(list: int, f: int, td: int) -> int {
             __rt_retain(item)
         }
         __store64(items + n * 8, item)
-        __store64(keys + n * 8, __call1(f, item))
+        var key = __call1(f, item)
+        __yield()
+        __store64(keys + n * 8, key)
         n += 1
     }
     // A merge sort on the two arrays together.
@@ -3212,6 +3228,321 @@ fn __rt_sleep(ms: int) {
     }
 }
 
+// ---- tasks ----
+//
+// `fork` starts a task: a function that runs on a stack of its own. Tasks
+// take turns on the one thread of the program. A task keeps the processor
+// until it has to wait (for a channel, for `sleep`) or reaches one of the
+// points where it lets the others go first; `__switch` then saves its
+// registers and its stack pointer, and loads those of the next one.
+//
+// The order in which tasks take turns is the one of the JavaScript target,
+// where each of these points is an `await`: a task that could go on at once
+// goes to the back of the line, and a task that was waiting joins the back
+// of the line when what it waited for happens.
+//
+// A task is a block of 64 bytes:
+
+const __T_SP = 0           // its stack pointer, while it is not running
+const __T_NEXT = 8         // the next task in the line it is in
+const __T_VALUE = 16       // the value it is sending, or the one it received
+const __T_GOT = 24         // 1 when a value was handed to it
+const __T_CLOSURE = 32     // the function it runs
+const __T_STACK = 40       // the memory of its stack
+const __T_WAKE = 48        // when it wakes up, if it sleeps (milliseconds)
+
+const __STACK = 262144
+
+// The running task. The first call makes the task of `main`.
+fn __rt_current() -> int {
+    var state = __state()
+    var me = __load64(state + __S_CURRENT)
+    if me == 0 {
+        me = __rt_alloc(64)
+        __store64(me + __T_NEXT, 0)
+        __store64(me + __T_CLOSURE, 0)
+        __store64(me + __T_STACK, 0)
+        __store64(state + __S_CURRENT, me)
+        __store64(state + __S_MAIN, me)
+    }
+    return me
+}
+
+// Lines of tasks: `line` is the address of two words, the first task and
+// the last one.
+
+fn __rt_line_add(line: int, task: int) {
+    __store64(task + __T_NEXT, 0)
+    var last = __load64(line + 8)
+    if last == 0 {
+        __store64(line, task)
+    } else {
+        __store64(last + __T_NEXT, task)
+    }
+    __store64(line + 8, task)
+}
+
+fn __rt_line_take(line: int) -> int {
+    var first = __load64(line)
+    if first != 0 {
+        var next = __load64(first + __T_NEXT)
+        __store64(line, next)
+        if next == 0 {
+            __store64(line + 8, 0)
+        }
+    }
+    return first
+}
+
+// `task` can go on: it joins the back of the line.
+fn __rt_ready(task: int) {
+    __rt_line_add(__state() + __S_READY, task)
+}
+
+// Gives the stack of a finished task back to the system. It cannot do that
+// itself, while standing on it: the next task to come by does.
+fn __rt_reap() {
+    var state = __state()
+    var dead = __load64(state + __S_ZOMBIE)
+    if dead != 0 && dead != __load64(state + __S_CURRENT) {
+        __store64(state + __S_ZOMBIE, 0)
+        __syscall(11, __load64(dead + __T_STACK), __STACK, 0, 0, 0, 0)
+        __rt_free(dead, 64)
+    }
+}
+
+// `me` cannot go on for now (it is in some line, or finished): runs the next
+// task. Returns when it is the turn of `me` again.
+fn __rt_schedule(me: int) {
+    var state = __state()
+    var next = __rt_line_take(state + __S_READY)
+    while next == 0 {
+        // Nobody can go on: wait for the first sleeper to wake up.
+        var sleeper = __load64(state + __S_TIMERS)
+        if sleeper == 0 {
+            if __load64(state + __S_MAIN_DONE) != 0 {
+                // Nothing will happen any more: `main` gets to end the program.
+                next = __load64(state + __S_MAIN)
+                break
+            }
+            __rt_flush()
+            __rt_write(2, "fatal: deadlock: the program is waiting on a channel that nobody will ever use\n")
+            __syscall(231, 2, 0, 0, 0, 0, 0)
+        }
+        var wait = __load64(sleeper + __T_WAKE) - __rt_now()
+        if wait > 0 {
+            __rt_sleep(wait)
+        }
+        __store64(state + __S_TIMERS, __load64(sleeper + __T_NEXT))
+        next = sleeper
+    }
+    __store64(state + __S_CURRENT, next)
+    if next != me {
+        __switch(me + __T_SP, __load64(next + __T_SP))
+    }
+    __rt_reap()
+}
+
+// Lets the tasks that are ready go first, if there are any.
+fn __rt_yield() {
+    var state = __state()
+    if __load64(state + __S_READY) == 0 {
+        return
+    }
+    var me = __rt_current()
+    __rt_ready(me)
+    __rt_schedule(me)
+}
+
+// Starts `f`, a function without parameters, as a new task. The new task
+// runs at once, until it first has to wait; the one that started it is the
+// next to go on.
+fn __rt_fork(f: int) {
+    var state = __state()
+    var me = __rt_current()
+    var task = __rt_alloc(64)
+    var stack = __rt_map(__STACK)
+    // What `__switch` expects to find on a stack: seven saved registers,
+    // then the address to go on at (here, the start of every task).
+    var sp = stack + __STACK - 64
+    var i = 0
+    while i < 7 {
+        __store64(sp + i * 8, 0)
+        i += 1
+    }
+    __store64(sp + 56, __task_entry())
+    __store64(task + __T_SP, sp)
+    __store64(task + __T_CLOSURE, f)
+    __store64(task + __T_STACK, stack)
+    // `me` goes to the front of the line.
+    var line = state + __S_READY
+    __store64(me + __T_NEXT, __load64(line))
+    __store64(line, me)
+    if __load64(line + 8) == 0 {
+        __store64(line + 8, me)
+    }
+    __store64(state + __S_CURRENT, task)
+    __switch(me + __T_SP, sp)
+    __rt_reap()
+}
+
+// Where a task ends up when its function returns.
+fn __rt_task_exit() {
+    var state = __state()
+    var me = __load64(state + __S_CURRENT)
+    __rt_release(__load64(me + __T_CLOSURE))
+    __rt_reap()
+    __store64(state + __S_ZOMBIE, me)
+    __rt_schedule(me)
+}
+
+// `main` has returned: the other tasks run until none of them can go on.
+fn __rt_finish() {
+    var state = __state()
+    var me = __load64(state + __S_CURRENT)
+    if me == 0 {
+        return
+    }
+    __store64(state + __S_MAIN_DONE, 1)
+    if __load64(state + __S_READY) != 0 || __load64(state + __S_TIMERS) != 0 {
+        __rt_schedule(me)
+    }
+}
+
+// `sleep` in a program with tasks: the others run meanwhile.
+fn __rt_task_sleep(ms: int) {
+    var state = __state()
+    var me = __rt_current()
+    if ms < 1 {
+        ms = 1
+    }
+    var wake = __rt_now() + ms
+    __store64(me + __T_WAKE, wake)
+    // Sleepers are kept in the order in which they wake up.
+    var at = state + __S_TIMERS
+    while __load64(at) != 0 && __load64(__load64(at) + __T_WAKE) <= wake {
+        at = __load64(at) + __T_NEXT
+    }
+    __store64(me + __T_NEXT, __load64(at))
+    __store64(at, me)
+    __rt_schedule(me)
+}
+
+// ---- channels ----
+//
+// A channel is an object with these fields (its descriptor is written like
+// the one of a struct, so that it is released like one):
+
+const __C_CAP = 8          // how many values it can hold without a receiver
+const __C_CLOSED = 16
+const __C_BUFFER = 24      // those values, in a list
+const __C_RECEIVERS = 32   // the line of tasks waiting for a value (two words)
+const __C_SENDERS = 48     // the line of tasks waiting to hand one over (two words)
+
+fn __rt_chan_new(td: int, capacity: int) -> int {
+    var ch = __rt_new(td, 64)
+    if capacity < 0 {
+        capacity = 0
+    }
+    __store64(ch + __C_CAP, capacity)
+    __store64(ch + __C_CLOSED, 0)
+    // The descriptor of the list is the one of the third field.
+    __store64(ch + __C_BUFFER, __rt_list_new(__load64(td + 72), 0))
+    __store64(ch + __C_RECEIVERS, 0)
+    __store64(ch + __C_RECEIVERS + 8, 0)
+    __store64(ch + __C_SENDERS, 0)
+    __store64(ch + __C_SENDERS + 8, 0)
+    return ch
+}
+
+// `ch <- v`. The value moves into the channel.
+fn __rt_chan_send(ch: int, v: int) {
+    if __load64(ch + __C_CLOSED) != 0 {
+        __rt_panic("send on a closed channel")
+    }
+    var receiver = __rt_line_take(ch + __C_RECEIVERS)
+    if receiver != 0 {
+        // Somebody was waiting for it.
+        __store64(receiver + __T_VALUE, v)
+        __store64(receiver + __T_GOT, 1)
+        __rt_ready(receiver)
+        __rt_yield()
+        return
+    }
+    var buffer = __load64(ch + __C_BUFFER)
+    if __load64(buffer + 8) < __load64(ch + __C_CAP) {
+        __rt_list_push(buffer, v)
+        __rt_yield()
+        return
+    }
+    // Nobody yet: wait until a receiver takes it.
+    var me = __rt_current()
+    __store64(me + __T_VALUE, v)
+    __rt_line_add(ch + __C_SENDERS, me)
+    __rt_schedule(me)
+}
+
+// Takes the next value out of the channel, waiting for one if need be.
+// `__S_CHAN_OK` then says whether there was one, or the channel is closed
+// and empty.
+fn __rt_chan_take(ch: int) -> int {
+    var state = __state()
+    var buffer = __load64(ch + __C_BUFFER)
+    if __load64(buffer + 8) > 0 {
+        var v = __rt_list_remove(buffer, 0)
+        // That made room for a sender that was waiting.
+        var sender = __rt_line_take(ch + __C_SENDERS)
+        if sender != 0 {
+            __rt_list_push(buffer, __load64(sender + __T_VALUE))
+            __rt_ready(sender)
+        }
+        __rt_yield()
+        __store64(state + __S_CHAN_OK, 1)
+        return v
+    }
+    var sender = __rt_line_take(ch + __C_SENDERS)
+    if sender != 0 {
+        var v = __load64(sender + __T_VALUE)
+        __rt_ready(sender)
+        __rt_yield()
+        __store64(state + __S_CHAN_OK, 1)
+        return v
+    }
+    if __load64(ch + __C_CLOSED) != 0 {
+        __rt_yield()
+        __store64(state + __S_CHAN_OK, 0)
+        return 0
+    }
+    var me = __rt_current()
+    __store64(me + __T_GOT, 0)
+    __store64(me + __T_VALUE, 0)
+    __rt_line_add(ch + __C_RECEIVERS, me)
+    __rt_schedule(me)
+    __store64(state + __S_CHAN_OK, __load64(me + __T_GOT))
+    return __load64(me + __T_VALUE)
+}
+
+// `<-ch`
+fn __rt_chan_recv(ch: int) -> int {
+    var v = __rt_chan_take(ch)
+    if __load64(__state() + __S_CHAN_OK) == 0 {
+        __rt_panic("receive from a closed channel")
+    }
+    __rt_yield()
+    return v
+}
+
+// Nothing more will be sent: those who wait for a value are told so.
+fn __rt_chan_close(ch: int) {
+    __store64(ch + __C_CLOSED, 1)
+    var receiver = __rt_line_take(ch + __C_RECEIVERS)
+    while receiver != 0 {
+        __store64(receiver + __T_GOT, 0)
+        __rt_ready(receiver)
+        receiver = __rt_line_take(ch + __C_RECEIVERS)
+    }
+}
+
 // ---- output ----
 //
 // Standard output goes through a buffer. It is written out when it is full,
@@ -3351,14 +3682,22 @@ fn __rt_checks_end(count: int) {
 }
 
 fn __rt_expect_failed(place: string) {
-    if __load64(__state() + __S_TEST) != 0 {
+    if __rt_in_check() {
         __rt_check_abandon("expectation failed at " + place)
     }
     __rt_panic("expectation failed at " + place)
 }
 
+// Whether a failure can be reported as a failed check: `onyx test` is
+// running one, and we are in it (not in a task that it started).
+fn __rt_in_check() -> bool {
+    var state = __state()
+    var current = __load64(state + __S_CURRENT)
+    return __load64(state + __S_TEST) != 0 && (current == 0 || current == __load64(state + __S_MAIN))
+}
+
 fn __rt_panic(message: string) {
-    if __load64(__state() + __S_TEST) != 0 {
+    if __rt_in_check() {
         __rt_check_abandon("panic: " + message)
     }
     __rt_flush()
