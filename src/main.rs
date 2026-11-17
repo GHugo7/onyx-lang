@@ -71,6 +71,7 @@ fn main() {
         "ast" => dump_ast(&source_arg(rest)),
         "modules" => dump_modules(&source_arg(rest)),
         "types" => dump_types(&source_arg(rest)),
+        "lowered" => dump_lowered(&source_arg(rest)),
         "explain" => explain(rest),
         "version" | "--version" | "-V" => println!("onyx {VERSION}"),
         "help" | "--help" | "-h" => println!("{USAGE}"),
@@ -134,6 +135,38 @@ fn dump_types(path: &Path) {
         Ok(analysis) => print!("{}", checker::dump(&analysis)),
         Err(diags) => diags.iter().for_each(dump_diag),
     }
+}
+
+/// The program as the native code generator receives it, the runtime
+/// included, after the passes that prepare it (stage 5 of the compiler
+/// written in Onyx is compared on this).
+fn dump_lowered(path: &Path) {
+    let mut sources = diagnostics::SourceMap::default();
+    let prelude = Some(("<onyx runtime>", native::RUNTIME_SOURCE));
+    let (mut program, runtime) = match modules::load(path, &mut sources, prelude, None) {
+        Ok(loaded) => loaded,
+        Err(Ok(diags)) => return diags.iter().for_each(dump_diag),
+        Err(Err(_)) => return println!("fatal"),
+    };
+    let mut analysis = match checker::check(&program, &sources.text, true, runtime) {
+        Ok(analysis) => analysis,
+        Err(diags) => return diags.iter().for_each(dump_diag),
+    };
+    desugar::desugar(&mut program, &mut analysis);
+    optimize::optimize(&mut program);
+    native::prepare(&mut program, &mut analysis);
+    let mut dump = dump::Dump::new(&sources.text);
+    dump.ids = true;
+    dump.program(&program);
+    print!("{}", dump.out);
+    print!("{}", checker::dump(&analysis));
+    let mut lambdas: Vec<&usize> = analysis.captures.keys().collect();
+    lambdas.sort();
+    for id in lambdas {
+        let captured: Vec<String> = analysis.captures[id].iter().map(|(name, ty)| format!("{name}: {ty}")).collect();
+        println!("captures {id} {}", captured.join(", "));
+    }
+    println!("forks {}", analysis.has_forks);
 }
 
 fn dump_tokens(path: &Path) {

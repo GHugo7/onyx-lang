@@ -9,6 +9,8 @@ use crate::diagnostics::Span;
 pub struct Dump<'a> {
     src: &'a str,
     pub out: String,
+    /// Shows the id of every expression (`#12`).
+    pub ids: bool,
 }
 
 pub fn quote(s: &str) -> String {
@@ -34,7 +36,7 @@ fn at(span: Span) -> String {
 
 impl<'a> Dump<'a> {
     pub fn new(src: &'a str) -> Dump<'a> {
-        Dump { src, out: String::new() }
+        Dump { src, out: String::new(), ids: false }
     }
 
     fn line(&mut self, depth: usize, text: &str) {
@@ -243,9 +245,14 @@ impl<'a> Dump<'a> {
     }
 
     fn expr(&mut self, depth: usize, e: &Expr) {
-        let span = at(e.span);
+        let span = if self.ids { format!("{} #{}", at(e.span), e.id) } else { at(e.span) };
         match &e.kind {
             ExprKind::Int(n) => self.line(depth, &format!("Int {n} {span}")),
+            ExprKind::Float(x) if self.ids => {
+                // A float may have been computed by the compiler: its bits say exactly which.
+                let text = &self.src[e.span.start..e.span.end];
+                self.line(depth, &format!("Float {text} {span} bits={}", x.to_bits() as i64));
+            }
             ExprKind::Float(_) => {
                 let text = &self.src[e.span.start..e.span.end];
                 self.line(depth, &format!("Float {text} {span}"));

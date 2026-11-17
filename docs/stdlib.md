@@ -34,6 +34,7 @@ means the call can fail and must be handled with `?`, `or` or `catch`.
 | `chr(n: int) -> string` | The character with that number |
 | `bytes(s: string) -> [int]` | The bytes of the string (UTF-8) |
 | `from_bytes(data: [int]) -> string` | The string made of these bytes |
+| `float_bits(x: float) -> int`, `float_from_bits(n: int) -> float` | The 64 bits of a float (IEEE 754), and back |
 | `read_bytes(path: string) -> [int]!` | The bytes of a file |
 | `write_bytes(path: string, data: [int]) -> void!` | Writes one byte per number |
 

@@ -114,8 +114,10 @@ impl<'a> Desugar<'a> {
         };
         self.matches += 1;
         let holder = format!("$m{}", self.matches);
-        // Hidden variables get positions past any real source (see plan.rs).
-        let position = usize::MAX / 8 + self.matches;
+        // Hidden variables get positions past any real source (see plan.rs),
+        // below 2^53 so that the compiler written in Onyx has them exactly
+        // on every target.
+        let position = (1usize << 50) + self.matches;
         let subject_span = subject.span;
         let keep = Stmt {
             span,

@@ -38,7 +38,7 @@ use std::collections::{HashMap, HashSet};
 type Key = (usize, bool);
 
 /// Variables made by this pass get positions past any real source.
-const BOX_POSITIONS: usize = usize::MAX / 4;
+const BOX_POSITIONS: usize = 2 << 50;
 
 /// A `fork` block is a lambda handed to the runtime, which runs it as a new
 /// task: `fork { body }` becomes `__fork(fn() { body })`. From here on it is

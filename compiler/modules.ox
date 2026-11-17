@@ -152,7 +152,7 @@ fn is_builtin(name: string) -> bool {
         "read_file", "write_file", "append_file", "file_exists", "args", "env", "exit", "sleep", "now", "random",
         "random_int", "input", "fetch", "expect", "panic", "sqrt", "bit_and", "bit_or", "bit_xor", "shift_left",
         "shift_right", "bit_not", "ord", "chr", "bytes", "from_bytes", "read_bytes", "write_bytes", "pow",
-        "floor", "ceil", "round", "__syscall", "__load8", "__load32", "__load64", "__store8", "__store32",
+        "floor", "ceil", "round", "float_bits", "float_from_bits", "__syscall", "__load8", "__load32", "__load64", "__store8", "__store32",
         "__store64", "__copy", "__and", "__or", "__xor", "__shl", "__shr", "__sar", "__call1", "__unwind",
         "__yield", "__switch", "__task_entry", "__fault_entry", "__bits", "__float", "__state", "__str_ptr",
         "__ptr_str", "__td_string"]

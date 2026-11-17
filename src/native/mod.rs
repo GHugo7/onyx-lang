@@ -84,6 +84,13 @@ const FLOAT_REGS: [Xmm; 6] = [2, 3, 4, 5, 6, 7];
 /// Key of the `self` parameter of a method (its position is the method's name).
 const SELF: u8 = 3;
 
+/// The passes that prepare a checked program for the code generator.
+pub fn prepare(program: &mut Program, an: &mut Analysis) {
+    widen::widen(program, an);
+    capture::capture(program, an);
+    lower::lower(program, an);
+}
+
 /// `tests`: build a program that runs the `check` blocks instead of `main`
 /// (the sources are needed to say where an expectation failed).
 pub fn generate(
@@ -92,9 +99,7 @@ pub fn generate(
     leak_check: bool,
     tests: Option<&crate::diagnostics::SourceMap>,
 ) -> Result<Vec<u8>, Vec<Diagnostic>> {
-    widen::widen(program, an);
-    capture::capture(program, an);
-    lower::lower(program, an);
+    prepare(program, an);
     let (program, an) = (&*program, &*an);
     let mut g = Gen {
         an,
@@ -3981,7 +3986,7 @@ impl<'a> Gen<'a> {
                 }
             }
             // A float and its bits are the same 64 bits: only the type changes.
-            "__bits" | "__float" => self.expr(&args[0]),
+            "__bits" | "__float" | "float_bits" | "float_from_bits" => self.expr(&args[0]),
             "__call1" => {
                 // Calls a closure with one argument.
                 self.expr(&args[0]);

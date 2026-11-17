@@ -337,8 +337,11 @@ fn builtin_sig(name: string) -> BuiltinSig! {
         "__task_entry", "__fault_entry", "__state", "__td_string" {
             return bsig(none, i, false, false)
         }
-        "__bits" {
+        "__bits", "float_bits" {
             return bsig([f], i, false, false)
+        }
+        "float_from_bits" {
+            return bsig([i], f, false, false)
         }
         "__float" {
             return bsig([i], f, false, false)

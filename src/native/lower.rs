@@ -24,7 +24,8 @@ use std::collections::HashSet;
 
 /// Temporary variables get positions past any real source, so that they
 /// never share a key with a variable of the program (see `plan.rs`).
-const TEMP_POSITIONS: usize = usize::MAX / 2;
+/// (Below 2^53, so that the compiler written in Onyx has them exactly.)
+const TEMP_POSITIONS: usize = 3 << 50;
 
 pub fn lower(program: &mut Program, an: &mut Analysis) {
     let globals: HashSet<String> = program

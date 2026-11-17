@@ -152,6 +152,10 @@ const $rt = (() => {
       : panic("chr: " + n + " is not a character");
   const bytes = (s) => Array.from(new TextEncoder().encode(s));
   const fromBytes = (list) => new TextDecoder().decode(Uint8Array.from(list));
+  // The 64 bits of a float, as an int (exact only up to 2^53 on this target).
+  const floatView = new DataView(new ArrayBuffer(8));
+  const floatBits = (x) => (floatView.setFloat64(0, x), Number(floatView.getBigInt64(0)));
+  const floatFromBits = (n) => (floatView.setBigInt64(0, BigInt.asIntN(64, BigInt(n))), floatView.getFloat64(0));
 
   // ---- weak references ----
   // JavaScript frees objects with a garbage collector, which cycles do not
@@ -398,7 +402,7 @@ const $rt = (() => {
     OnyxError, Chan, CLOSED, panic, fail, str, fstr, print, idiv, imod, idx, setIdx, mapGet, eq,
     or, orAsync, pass, passAsync, caught, fork, sleep, run, runTests, expect, parseInt_, parseFloat_, readFile,
     writeFile, appendFile, fileExists, args, env, exit, input, fetch_, randomInt, list, strIdx,
-    repeat, replace, split, mapTryGet, weak, weakGet, noWeak, bitAnd, bitOr, bitXor, shiftLeft, shiftRight, bitNot, ord, chr, bytes, fromBytes,
+    repeat, replace, split, mapTryGet, weak, weakGet, noWeak, bitAnd, bitOr, bitXor, shiftLeft, shiftRight, bitNot, ord, chr, bytes, fromBytes, floatBits, floatFromBits,
     readBytes, writeBytes,
     setWriter: (w) => (write = w),
   };
