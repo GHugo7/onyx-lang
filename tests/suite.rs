@@ -159,10 +159,11 @@ fn test_files_are_found_and_run() {
 }
 
 /// The compiler written in Onyx (compiler/) is checked stage by stage
-/// against the one written in Rust. Stage 1, the lexer: the same tokens for
-/// every Onyx file of the repository, the lexer itself included.
+/// against the one written in Rust, on every Onyx file of the repository
+/// (its own source included): stage 1, the lexer, must give the same tokens,
+/// and stage 2, the parser, the same syntax tree or the same error.
 #[test]
-fn onyx_lexer_agrees_with_the_rust_lexer() {
+fn onyx_compiler_agrees_with_the_rust_compiler() {
     let exe = std::env::temp_dir().join(format!("onyx-selfhost-{}", std::process::id()));
     let built = Command::new(ONYX).args(["build", "--target", "native", "compiler/main.ox", "-o"]).arg(&exe).output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
@@ -180,9 +181,16 @@ fn onyx_lexer_agrees_with_the_rust_lexer() {
     }
     assert!(files.len() > 100);
     for file in files {
-        let expected = Command::new(ONYX).arg("tokens").arg(&file).output().unwrap();
-        let found = Command::new(&exe).arg("tokens").arg(&file).output().unwrap();
-        assert_eq!(String::from_utf8_lossy(&found.stdout), String::from_utf8_lossy(&expected.stdout), "{}", file.display());
+        for stage in ["tokens", "ast"] {
+            let expected = Command::new(ONYX).arg(stage).arg(&file).output().unwrap();
+            let found = Command::new(&exe).arg(stage).arg(&file).output().unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&found.stdout),
+                String::from_utf8_lossy(&expected.stdout),
+                "{stage} of {}",
+                file.display()
+            );
+        }
     }
     let _ = std::fs::remove_file(&exe);
 }

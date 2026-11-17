@@ -1,44 +1,9 @@
 // The Onyx compiler, written in Onyx. (In progress: see docs/selfhost.md.)
 
 import "diag"
+import "dump"
 import "lexer"
-
-// The name of a token, as the compiler written in Rust calls it.
-fn tok_name(t: lexer.Tok) -> string {
-    var shown = str(t).split("(")[0]
-    var parts = shown.split(".")
-    return parts[parts.len() - 1]
-}
-
-fn quote(text: string) -> string {
-    var out = "\""
-    for c in text {
-        match c {
-            "\\" {
-                out += "\\\\"
-            }
-            "\"" {
-                out += "\\\""
-            }
-            "\n" {
-                out += "\\n"
-            }
-            "\t" {
-                out += "\\t"
-            }
-            "\r" {
-                out += "\\r"
-            }
-            "\0" {
-                out += "\\0"
-            }
-            else {
-                out += c
-            }
-        }
-    }
-    return out + "\""
-}
+import "parser"
 
 // Prints what the lexer makes of a file, one token per line, in the same
 // form as `onyx tokens` of the compiler written in Rust.
@@ -56,7 +21,7 @@ fn dump_tokens(path: string) -> void! {
         if t.nl_before {
             nl = 1
         }
-        var line = "{t.start} {t.end} {nl} {tok_name(t.tok)}"
+        var line = "{t.start} {t.end} {nl} {dump.variant_name(str(t.tok))}"
         match t.tok {
             Int(n) {
                 line += " {n}"
@@ -71,7 +36,7 @@ fn dump_tokens(path: string) -> void! {
                 for piece in pieces {
                     match piece {
                         Lit(text) {
-                            line += " L" + quote(text)
+                            line += " L" + dump.quote(text)
                         }
                         Code(start, end) {
                             line += " C{start}:{end}"
@@ -86,12 +51,34 @@ fn dump_tokens(path: string) -> void! {
     }
 }
 
+// Prints the syntax tree of a file, in the same form as `onyx ast` of the
+// compiler written in Rust.
+fn dump_ast(path: string) -> void! {
+    var src = read_bytes(path)?
+    var report = diag.new_report()
+    var program = parser.parse(src, 0, src.len(), 0, report) catch err {
+        for d in report.diags {
+            print("error {d.code} {d.start} {d.end} {d.message}")
+        }
+        return
+    }
+    var out = dump.Dump{src: src, lines: []}
+    out.program(program)
+    for line in out.lines {
+        print(line)
+    }
+}
+
 fn main() -> void! {
     var arguments = args()
+    if arguments.len() == 2 && arguments[0] == "ast" {
+        dump_ast(arguments[1])?
+        return
+    }
     if arguments.len() == 2 && arguments[0] == "tokens" {
         dump_tokens(arguments[1])?
         return
     }
-    print("usage: tokens <file.ox>")
+    print("usage: tokens <file.ox> | ast <file.ox>")
     exit(2)
 }

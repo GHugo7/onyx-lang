@@ -4,6 +4,7 @@ mod ast;
 mod checker;
 mod codegen_js;
 mod desugar;
+mod dump;
 mod diagnostics;
 mod lexer;
 mod modules;
@@ -67,11 +68,24 @@ fn main() {
         // For the compiler written in Onyx (see compiler/): what the lexer
         // makes of a file, in a form that the two can be compared on.
         "tokens" => dump_tokens(&source_arg(rest)),
+        "ast" => dump_ast(&source_arg(rest)),
         "explain" => explain(rest),
         "version" | "--version" | "-V" => println!("onyx {VERSION}"),
         "help" | "--help" | "-h" => println!("{USAGE}"),
         other if other.ends_with(".ox") => run(&args, false),
         other => die(&format!("unknown command `{other}`\n\n{USAGE}")),
+    }
+}
+
+fn dump_ast(path: &Path) {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("cannot read `{}`: {e}", path.display())));
+    match parser::parse(&text, 0, text.len(), 0) {
+        Ok((program, _)) => {
+            let mut dump = dump::Dump::new(&text);
+            dump.program(&program);
+            print!("{}", dump.out);
+        }
+        Err(d) => println!("error {} {} {} {}", d.code, d.span.start, d.span.end, d.message),
     }
 }
 
