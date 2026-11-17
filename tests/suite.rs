@@ -112,8 +112,9 @@ fn documentation_examples_compile() {
         let text = std::fs::read_to_string(&file).unwrap();
         for (i, block) in text.split("```onyx\n").skip(1).enumerate() {
             let code = block.split("```").next().unwrap();
-            // Only complete, single-file programs can be checked on their own.
-            if !code.contains("fn main(") || code.contains("import \"") {
+            // Only complete, single-file programs can be checked on their own
+            // (not those that import a file, or read one with `embed`).
+            if !code.contains("fn main(") || code.contains("import \"") || code.contains("embed(\"") {
                 continue;
             }
             let path = dir.join(format!("snippet{checked}.ox"));
