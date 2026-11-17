@@ -1159,5 +1159,5 @@ fn parse(src: [int], start: int, end: int, first_id: int, report: diag.Report) -
     while p.peek() != lexer.Tok.Eof {
         items.push(p.item()?)
     }
-    return ast.Program{items: items}
+    return ast.Program{items: items, next_id: p.next_id}
 }

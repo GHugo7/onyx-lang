@@ -12,8 +12,8 @@ it appears.
 | --- | --- | --- |
 | 1 | Lexer: source text to tokens (`compiler/lexer.ox`) | done |
 | 2 | Parser: tokens to a syntax tree (`compiler/parser.ox`, `compiler/ast.ox`) | done |
-| 3 | Modules: `import`, names across files | next |
-| 4 | Type checker | |
+| 3 | Modules: `import`, names across files (`compiler/modules.ox`) | done |
+| 4 | Type checker | next |
 | 5 | Native code generator and ELF writer | |
 | 6 | The Onyx compiler compiles itself | |
 
@@ -46,10 +46,18 @@ the repository's files (cut short, with bytes left out or added).
 Built natively, the Onyx compiler parses the 4000 lines of the runtime in
 17 ms; the Rust compiler takes 12 ms.
 
+`onyx modules file` and `compiler/main.ox modules file` print the program
+once all its files are linked into one (stage 3); `tests/modules` holds a
+project made to exercise the awkward cases of imports.
+
 ## How the two differ
 
 - The Onyx lexer accepts any character outside ASCII in a name; the Rust
   one only accepts letters and digits.
+- The Rust compiler asks the system for the real path of a file to tell
+  whether two imports name the same one; the Onyx compiler tidies the path
+  up itself (`a/./b/../c.ox` is `a/c.ox`). They only disagree when symbolic
+  links are involved.
 
 ## What the language gained for this
 

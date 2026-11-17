@@ -3,6 +3,7 @@
 import "diag"
 import "dump"
 import "lexer"
+import "modules"
 import "parser"
 
 // Prints what the lexer makes of a file, one token per line, in the same
@@ -69,8 +70,32 @@ fn dump_ast(path: string) -> void! {
     }
 }
 
+// Prints the program once its files are linked into one, in the same form
+// as `onyx modules` of the compiler written in Rust.
+fn dump_modules(path: string) {
+    var report = diag.new_report()
+    var linked = modules.load(path, report) catch err {
+        if err.message == "fatal" {
+            print("fatal")
+        }
+        for d in report.diags {
+            print("error {d.code} {d.start} {d.end} {d.message}")
+        }
+        return
+    }
+    var out = dump.Dump{src: linked.sources.bytes, lines: []}
+    out.program(linked.program)
+    for line in out.lines {
+        print(line)
+    }
+}
+
 fn main() -> void! {
     var arguments = args()
+    if arguments.len() == 2 && arguments[0] == "modules" {
+        dump_modules(arguments[1])
+        return
+    }
     if arguments.len() == 2 && arguments[0] == "ast" {
         dump_ast(arguments[1])?
         return
@@ -79,6 +104,6 @@ fn main() -> void! {
         dump_tokens(arguments[1])?
         return
     }
-    print("usage: tokens <file.ox> | ast <file.ox>")
+    print("usage: tokens <file.ox> | ast <file.ox> | modules <file.ox>")
     exit(2)
 }

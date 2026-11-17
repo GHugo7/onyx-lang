@@ -69,6 +69,7 @@ fn main() {
         // makes of a file, in a form that the two can be compared on.
         "tokens" => dump_tokens(&source_arg(rest)),
         "ast" => dump_ast(&source_arg(rest)),
+        "modules" => dump_modules(&source_arg(rest)),
         "explain" => explain(rest),
         "version" | "--version" | "-V" => println!("onyx {VERSION}"),
         "help" | "--help" | "-h" => println!("{USAGE}"),
@@ -86,6 +87,25 @@ fn dump_ast(path: &Path) {
             print!("{}", dump.out);
         }
         Err(d) => println!("error {} {} {} {}", d.code, d.span.start, d.span.end, d.message),
+    }
+}
+
+/// The program once its files are linked into one (stage 3 of the compiler
+/// written in Onyx is compared on this).
+fn dump_modules(path: &Path) {
+    let mut sources = diagnostics::SourceMap::default();
+    match modules::load(path, &mut sources, None, None) {
+        Ok((program, _)) => {
+            let mut dump = dump::Dump::new(&sources.text);
+            dump.program(&program);
+            print!("{}", dump.out);
+        }
+        Err(Ok(diags)) => {
+            for d in diags {
+                println!("error {} {} {} {}", d.code, d.span.start, d.span.end, d.message);
+            }
+        }
+        Err(Err(_)) => println!("fatal"),
     }
 }
 

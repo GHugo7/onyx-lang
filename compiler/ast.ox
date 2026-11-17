@@ -103,6 +103,8 @@ enum Item {
 
 struct Program {
     items: [Item]
+    // The first expression id that is still free.
+    next_id: int
 }
 
 struct Block {
