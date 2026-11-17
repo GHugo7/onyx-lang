@@ -28,10 +28,15 @@ given a value when it is declared; there is no `null`.
 
 | Type | Examples | Notes |
 | --- | --- | --- |
-| `int` | `42`, `-7`, `1_000_000` | whole numbers |
+| `int` | `42`, `-7`, `1_000_000`, `0xFF`, `0b1010` | whole numbers, 64 bits |
 | `float` | `3.14`, `2.0`, `1.5e-7` | decimal numbers |
 | `bool` | `true`, `false` | |
 | `string` | `"hello"` | text, double quotes only |
+
+`0x` starts a number written in hexadecimal and `0b` one written in binary.
+They give the 64 bits of the int as they are, which is handy for working on
+bits (see the [standard library](../stdlib.md)): `0xFF` is 255, and
+`0xFFFFFFFFFFFFFFFF` is -1.
 
 An `int` is accepted wherever a `float` is expected. Every other conversion is
 explicit:

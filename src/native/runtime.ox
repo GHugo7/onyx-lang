@@ -373,9 +373,8 @@ fn __rt_append(a: int, b: int) -> int {
 // Number of characters in the `n` bytes at `at`.
 fn __rt_chars_in(at: int, n: int) -> int {
     var i = 0
-    // Eight bytes at a time while they are all plain ASCII (high bit clear):
-    // -9187201950435737472 is 0x8080808080808080.
-    while i + 8 <= n && __and(__load64(at + i), -9187201950435737472) == 0 {
+    // Eight bytes at a time while they are all plain ASCII (high bit clear).
+    while i + 8 <= n && __and(__load64(at + i), 0x8080808080808080) == 0 {
         i += 8
     }
     var count = i
@@ -413,7 +412,7 @@ fn __rt_char_size(lead: int) -> int {
 fn __rt_skip(at: int, n: int, count: int) -> int {
     var i = 0
     var left = count
-    while left >= 8 && i + 8 <= n && __and(__load64(at + i), -9187201950435737472) == 0 {
+    while left >= 8 && i + 8 <= n && __and(__load64(at + i), 0x8080808080808080) == 0 {
         i += 8
         left -= 8
     }
@@ -1066,7 +1065,7 @@ fn __rt_parse_int(s: string) -> int! {
         }
         i += size
     }
-    if !negative && value == -9223372036854775807 - 1 {
+    if !negative && value == 0x8000000000000000 {
         fits = false
     }
     if digits == 0 || i < n || !fits {
@@ -1399,13 +1398,13 @@ fn __big_bits(a: int) -> int {
 // Floating-Point Numbers Quickly and Accurately", 1996), which works with
 // exact fractions r / s and the half-distances to the neighbours, m+ and m-.
 fn __rt_float_digits(bits: int, out: int) -> int {
-    var fraction = __and(bits, 4503599627370495)
+    var fraction = __and(bits, 0xFFFFFFFFFFFFF)
     var exponent = __and(__shr(bits, 52), 2047)
     // The float is f * 2^e, with a whole number f.
     var f = fraction
     var e = -1074
     if exponent > 0 {
-        f = fraction + 4503599627370496
+        f = fraction + 0x10000000000000     // the implicit leading 1, 2^52
         e = exponent - 1075
     }
     var even = f % 2 == 0
@@ -1512,8 +1511,8 @@ fn __rt_float_str(x: float) -> string {
         return "NaN"
     }
     var bits = __bits(x)
-    var magnitude = __and(bits, 9223372036854775807)
-    if magnitude == 9218868437227405312 {
+    var magnitude = __and(bits, 0x7FFFFFFFFFFFFFFF)
+    if magnitude == 0x7FF0000000000000 {
         if bits < 0 {
             return "-Infinity"
         }
@@ -1522,8 +1521,9 @@ fn __rt_float_str(x: float) -> string {
     if magnitude == 0 {
         return "0.0"
     }
-    // Whole numbers that fit in an int are the common case, and an easy one.
-    if magnitude < 4845873199050653696 {
+    // Whole numbers that fit in an int are the common case, and an easy one
+    // (0x4340000000000000 is the float 2^53).
+    if magnitude < 0x4340000000000000 {
         var whole = int(x)
         if float(whole) == x {
             return __rt_int_str(whole) + ".0"
@@ -1725,13 +1725,13 @@ fn __rt_parse_float(s: string) -> float! {
 
     var sign = 0
     if negative {
-        sign = -9223372036854775807 - 1
+        sign = 0x8000000000000000
     }
     if count == 0 || count + power < -323 {
         return __float(sign)                        // zero, or too small to be anything else
     }
     if count + power > 309 {
-        return __float(__or(sign, 9218868437227405312))     // infinity
+        return __float(__or(sign, 0x7FF0000000000000))     // infinity
     }
     if count <= 15 && power >= -22 && power <= 22 {
         // The digits fit exactly in a float, and so does the power of ten:
@@ -1824,14 +1824,14 @@ fn __rt_parse_float(s: string) -> float! {
     }
     var lowest = drop - shift
     if m == 9007199254740992 {
-        m = 4503599627370496
+        m = 0x10000000000000
         lowest += 1
     }
     var exponent_bits = lowest + 1075
     if exponent_bits >= 2047 {
-        return __float(__or(sign, 9218868437227405312))
+        return __float(__or(sign, 0x7FF0000000000000))
     }
-    return __float(__or(sign, __or(__shl(exponent_bits, 52), m - 4503599627370496)))
+    return __float(__or(sign, __or(__shl(exponent_bits, 52), m - 0x10000000000000)))
 }
 
 // ---- powers ----

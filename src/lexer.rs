@@ -345,6 +345,30 @@ pub fn lex(src: &str, start: usize, end: usize) -> Result<Vec<Token>, Diagnostic
 fn lex_number(src: &str, i: &mut usize, end: usize) -> Result<Tok, Diagnostic> {
     let bytes = src.as_bytes();
     let start = *i;
+    // `0x1F` (hexadecimal) and `0b101` (binary) are whole numbers of up to
+    // 64 bits, which are the bits of the int: `0xFFFFFFFFFFFFFFFF` is -1.
+    if bytes[start] == b'0' && start + 1 < end && (bytes[start + 1] == b'x' || bytes[start + 1] == b'b') {
+        let (radix, bits, label) = if bytes[start + 1] == b'x' {
+            (16, 4, "hexadecimal digits are 0-9 and a-f")
+        } else {
+            (2, 1, "binary digits are 0 and 1")
+        };
+        *i = start + 2;
+        while *i < end && (bytes[*i].is_ascii_alphanumeric() || bytes[*i] == b'_') {
+            *i += 1;
+        }
+        let span = Span::new(start, *i);
+        let digits: Vec<u64> =
+            src[start + 2..*i].chars().filter(|c| *c != '_').map(|c| c.to_digit(radix).map_or(u64::MAX, u64::from)).collect();
+        if digits.is_empty() || digits.contains(&u64::MAX) {
+            return Err(Diagnostic::new("E0001", "invalid number", span).label(label));
+        }
+        if digits.iter().skip_while(|d| **d == 0).count() * bits > 64 {
+            return Err(Diagnostic::new("E0001", "integer literal is too large", span).label("does not fit in an int"));
+        }
+        let value = digits.iter().fold(0u64, |value, d| value << bits | d);
+        return Ok(Tok::Int(value as i64));
+    }
     while *i < end && (bytes[*i].is_ascii_digit() || bytes[*i] == b'_') {
         *i += 1;
     }

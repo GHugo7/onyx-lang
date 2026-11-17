@@ -110,6 +110,24 @@ fn is_letter(c: int) -> bool {
     return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 || c >= 128
 }
 
+fn is_ascii_letter(c: int) -> bool {
+    return (c >= 97 && c <= 122) || (c >= 65 && c <= 90)
+}
+
+// The value of a digit of a hexadecimal or binary number (99: not a digit).
+fn digit_value(c: int) -> int {
+    if is_digit(c) {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return 99
+}
+
 // The text between two positions.
 fn text_of(src: [int], start: int, end: int) -> string {
     return from_bytes(src.slice(start, end))
@@ -353,6 +371,11 @@ struct Lexer {
     fn number(self) -> Tok! {
         var src = self.src
         var start = self.at
+        // `0x1F` (hexadecimal) and `0b101` (binary) are whole numbers of up
+        // to 64 bits, which are the bits of the int: `0xFFFFFFFFFFFFFFFF` is -1.
+        if src[start] == 48 && start + 1 < self.end && (src[start + 1] == 120 || src[start + 1] == 98) {
+            return self.radix_number()?
+        }
         var i = start
         while i < self.end && (is_digit(src[i]) || src[i] == 95) {
             i += 1
@@ -393,6 +416,58 @@ struct Lexer {
             var d = self.report.add("E0001", "integer literal is too large", start, i)
             d.label = "does not fit in an int"
             fail "syntax"
+        }
+        return Tok.Int(value)
+    }
+
+    // `0x...` or `0b...`, with `self.at` on the `0`.
+    fn radix_number(self) -> Tok! {
+        var src = self.src
+        var start = self.at
+        var radix = 2
+        var bits = 1
+        var label = "binary digits are 0 and 1"
+        if src[start + 1] == 120 {
+            radix = 16
+            bits = 4
+            label = "hexadecimal digits are 0-9 and a-f"
+        }
+        var i = start + 2
+        while i < self.end && (is_digit(src[i]) || is_ascii_letter(src[i]) || src[i] == 95) {
+            i += 1
+        }
+        self.at = i
+        var digits: [int] = []
+        var valid = true
+        for k in start + 2..i {
+            if src[k] != 95 {
+                var d = digit_value(src[k])
+                if d >= radix {
+                    valid = false
+                }
+                digits.push(d)
+            }
+        }
+        if !valid || digits.len() == 0 {
+            var d = self.report.add("E0001", "invalid number", start, i)
+            d.label = label
+            fail "syntax"
+        }
+        var significant = digits.len()
+        for d in digits {
+            if d != 0 {
+                break
+            }
+            significant -= 1
+        }
+        if significant * bits > 64 {
+            var d = self.report.add("E0001", "integer literal is too large", start, i)
+            d.label = "does not fit in an int"
+            fail "syntax"
+        }
+        var value = 0
+        for d in digits {
+            value = value << bits | d
         }
         return Tok.Int(value)
     }
