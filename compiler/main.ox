@@ -1,5 +1,6 @@
 // The Onyx compiler, written in Onyx. (In progress: see docs/selfhost.md.)
 
+import "checker"
 import "diag"
 import "dump"
 import "lexer"
@@ -90,8 +91,47 @@ fn dump_modules(path: string) {
     }
 }
 
+// A problem, in full, as `onyx types` of the compiler written in Rust prints it.
+fn print_diag(d: diag.Diag) {
+    print("error {d.code} {d.start}:{d.end} {d.message}")
+    if d.label != "" {
+        print("  label: " + d.label)
+    }
+    if d.help != "" {
+        print("  help: " + d.help)
+    }
+}
+
+// Prints what the type checker finds out about a program, in the same form
+// as `onyx types` of the compiler written in Rust.
+fn dump_types(path: string) {
+    var report = diag.new_report()
+    var linked = modules.load(path, report) catch err {
+        if err.message == "fatal" {
+            print("fatal")
+        }
+        for d in report.diags {
+            print_diag(d)
+        }
+        return
+    }
+    var analysis = checker.check(linked.program, linked.sources.bytes, true, -1, -1, report) catch err {
+        for d in report.diags {
+            print_diag(d)
+        }
+        return
+    }
+    for line in checker.dump(analysis) {
+        print(line)
+    }
+}
+
 fn main() -> void! {
     var arguments = args()
+    if arguments.len() == 2 && arguments[0] == "types" {
+        dump_types(arguments[1])
+        return
+    }
     if arguments.len() == 2 && arguments[0] == "modules" {
         dump_modules(arguments[1])
         return
@@ -104,6 +144,6 @@ fn main() -> void! {
         dump_tokens(arguments[1])?
         return
     }
-    print("usage: tokens <file.ox> | ast <file.ox> | modules <file.ox>")
+    print("usage: tokens <file.ox> | ast <file.ox> | modules <file.ox> | types <file.ox>")
     exit(2)
 }

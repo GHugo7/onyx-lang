@@ -37,6 +37,47 @@ struct Loader<'a> {
     used_names: HashSet<String>,
 }
 
+/// `path` without `.` and with the `..` that can be resolved resolved, as
+/// the compiler written in Onyx does it (`join` in compiler/modules.ox). This
+/// is how a file is named in messages: as seen from where the program was
+/// started, like the user wrote it.
+fn tidy(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let absolute = text.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in text.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if parts.last().is_some_and(|last| *last != "..") {
+                parts.pop();
+                continue;
+            }
+            if absolute {
+                continue;
+            }
+        }
+        parts.push(part);
+    }
+    let joined = parts.join("/");
+    if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
+
+/// Imports may leave out the `.ox` at the end.
+fn with_ox(path: String) -> String {
+    let name = path.rsplit('/').next().unwrap_or(&path);
+    if name.len() > 3 && name.ends_with(".ox") {
+        path
+    } else {
+        path + ".ox"
+    }
+}
+
 fn is_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     chars.next().is_some_and(|c| c == '_' || c.is_alphabetic()) && chars.all(|c| c == '_' || c.is_alphanumeric())
@@ -73,11 +114,12 @@ pub fn load(
         let text = std::fs::read_to_string(path).map_err(|e| Err(format!("cannot read `{}`: {e}", path.display())))?;
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let dir = canonical.parent().map(Path::to_path_buf).unwrap_or_default();
+        let shown_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let (start, end) = loader.sources.add(path.to_string_lossy().to_string(), &text);
         let (program, next_id) =
             parser::parse(&loader.sources.text, start, end, loader.next_id).map_err(|d| Ok(vec![d]))?;
         loader.next_id = next_id;
-        loader.absorb(main, dir, program).map_err(|d| Ok(vec![d]))?;
+        loader.absorb(main, dir, shown_dir, program).map_err(|d| Ok(vec![d]))?;
     }
 
     let infos: Vec<ModInfo> = loader.modules.iter().map(module_info).collect();
@@ -142,6 +184,7 @@ fn module_info(module: &Module) -> ModInfo {
 
 impl<'a> Loader<'a> {
     fn load_file(&mut self, canonical: PathBuf, display: String, name: String, text: &str) -> Result<usize, Diagnostic> {
+        let shown_dir = Path::new(&display).parent().map(Path::to_path_buf).unwrap_or_default();
         let (start, end) = self.sources.add(display, text);
         let (program, next_id) = parser::parse(&self.sources.text, start, end, self.next_id)?;
         self.next_id = next_id;
@@ -150,14 +193,14 @@ impl<'a> Loader<'a> {
         let dir = canonical.parent().map(Path::to_path_buf).unwrap_or_default();
         self.by_path.insert(canonical, idx);
         self.modules.push(Module { name, items: Vec::new(), imports: HashMap::new() });
-        self.absorb(idx, dir, program)?;
+        self.absorb(idx, dir, shown_dir, program)?;
         self.order.push(idx);
         Ok(idx)
     }
 
-    /// Adds the items of a parsed file, found in `dir`, to module `idx`,
-    /// loading what it imports.
-    fn absorb(&mut self, idx: usize, dir: PathBuf, program: Program) -> Result<(), Diagnostic> {
+    /// Adds the items of a parsed file, found in `dir` (shown in messages as
+    /// `shown_dir`), to module `idx`, loading what it imports.
+    fn absorb(&mut self, idx: usize, dir: PathBuf, shown_dir: PathBuf, program: Program) -> Result<(), Diagnostic> {
         let mut imports: HashMap<String, usize> = std::mem::take(&mut self.modules[idx].imports);
         for item in &program.items {
             let Item::Import { path, alias, span } = item else { continue };
@@ -165,6 +208,7 @@ impl<'a> Loader<'a> {
             if file.extension().is_none_or(|ext| ext != "ox") {
                 file.as_mut_os_string().push(".ox");
             }
+            let shown = with_ox(tidy(&shown_dir.join(path)));
             let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let alias = alias.clone().unwrap_or_else(|| stem.clone());
             if !is_identifier(&alias) {
@@ -178,7 +222,7 @@ impl<'a> Loader<'a> {
             let not_found = |why: String| {
                 Diagnostic::new("E0400", format!("cannot find module \"{path}\""), *span)
                     .label(why)
-                    .help(format!("imports are relative to the importing file; looked for `{}`", file.display()))
+                    .help(format!("imports are relative to the importing file; looked for `{shown}`"))
             };
             let canonical = std::fs::canonicalize(&file).map_err(|_| not_found("no such file".into()))?;
             let target = match self.by_path.get(&canonical) {
@@ -193,7 +237,7 @@ impl<'a> Loader<'a> {
                         name = format!("{base}~{n}");
                         n += 1;
                     }
-                    self.load_file(canonical, file.to_string_lossy().to_string(), name, &text)?
+                    self.load_file(canonical, shown.clone(), name, &text)?
                 }
             };
             imports.insert(alias, target);

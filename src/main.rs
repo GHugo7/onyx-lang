@@ -70,6 +70,7 @@ fn main() {
         "tokens" => dump_tokens(&source_arg(rest)),
         "ast" => dump_ast(&source_arg(rest)),
         "modules" => dump_modules(&source_arg(rest)),
+        "types" => dump_types(&source_arg(rest)),
         "explain" => explain(rest),
         "version" | "--version" | "-V" => println!("onyx {VERSION}"),
         "help" | "--help" | "-h" => println!("{USAGE}"),
@@ -106,6 +107,32 @@ fn dump_modules(path: &Path) {
             }
         }
         Err(Err(_)) => println!("fatal"),
+    }
+}
+
+/// A problem, in full, for the comparisons with the compiler written in Onyx.
+fn dump_diag(d: &diagnostics::Diagnostic) {
+    println!("error {} {}:{} {}", d.code, d.span.start, d.span.end, d.message);
+    if !d.label.is_empty() {
+        println!("  label: {}", d.label);
+    }
+    if let Some(help) = &d.help {
+        println!("  help: {help}");
+    }
+}
+
+/// What the type checker learns about a program (stage 4 of the compiler
+/// written in Onyx is compared on this).
+fn dump_types(path: &Path) {
+    let mut sources = diagnostics::SourceMap::default();
+    let program = match modules::load(path, &mut sources, None, None) {
+        Ok((program, _)) => program,
+        Err(Ok(diags)) => return diags.iter().for_each(dump_diag),
+        Err(Err(_)) => return println!("fatal"),
+    };
+    match checker::check(&program, &sources.text, true, None) {
+        Ok(analysis) => print!("{}", checker::dump(&analysis)),
+        Err(diags) => diags.iter().for_each(dump_diag),
     }
 }
 

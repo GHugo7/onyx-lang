@@ -548,9 +548,15 @@ impl<'a> Checker<'a> {
     /// too early. The search follows every call that *could* happen, so it
     /// can reject a program that would in fact have been fine.
     fn check_initialization_order(&mut self) {
+        // In a fixed order (structs and methods by name), so that the chain
+        // of calls reported is always the same one.
         let mut methods_named: HashMap<&str, Vec<String>> = HashMap::new();
-        for (strukt, info) in &self.structs {
-            for method in info.methods.keys() {
+        let mut struct_names: Vec<&String> = self.structs.keys().collect();
+        struct_names.sort();
+        for strukt in struct_names {
+            let mut names: Vec<&String> = self.structs[strukt].methods.keys().collect();
+            names.sort();
+            for method in names {
                 methods_named.entry(method.as_str()).or_default().push(method_key(strukt, method));
             }
         }
@@ -2063,6 +2069,79 @@ impl<'a> Checker<'a> {
             }
         }
     }
+}
+
+/// The analysis as text, in a fixed order: the type of every expression (by
+/// id) with what else is known about it, then the async bodies and the
+/// signatures. The compiler written in Onyx prints the same (`types`).
+pub fn dump(an: &Analysis) -> String {
+    let mut out = String::new();
+    let mut ids: Vec<&usize> = an.types.keys().collect();
+    ids.sort();
+    for id in ids {
+        let mut line = format!("{id} {}", an.types[id]);
+        if let Some(call) = an.calls.get(id) {
+            line.push_str(&match call {
+                CallKind::Fn(name) => format!(" call=fn:{name}"),
+                CallKind::Method(strukt, name) => format!(" call=method:{strukt}.{name}"),
+                CallKind::Builtin(name) => format!(" call=builtin:{name}"),
+                CallKind::BuiltinMethod(recv, name) => format!(" call={recv:?}.{name}"),
+                CallKind::Dynamic => " call=dynamic".to_string(),
+            });
+        }
+        if an.fallible_calls.contains(id) {
+            line.push_str(" fallible");
+        }
+        if an.widened.contains(id) {
+            line.push_str(" widened");
+        }
+        if an.catch_values.contains(id) {
+            line.push_str(" catch-value");
+        }
+        if let Some((name, index)) = an.variants.get(id) {
+            line.push_str(&format!(" variant={name}:{index}"));
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    let mut keys: Vec<&String> = an.async_keys.iter().collect();
+    keys.sort();
+    for key in keys {
+        out.push_str(&format!("async {key}\n"));
+    }
+    let mut names: Vec<&String> = an.fns.keys().collect();
+    names.sort();
+    for name in names {
+        out.push_str(&format!("fn {name} {}\n", Type::Fn(an.fns[name].clone())));
+    }
+    let mut names: Vec<&String> = an.structs.keys().collect();
+    names.sort();
+    for name in names {
+        let info = &an.structs[name];
+        out.push_str(&format!("struct {name}\n"));
+        for (field, ty) in &info.fields {
+            out.push_str(&format!("  field {field} {ty}\n"));
+        }
+        let mut methods: Vec<&String> = info.methods.keys().collect();
+        methods.sort();
+        for method in methods {
+            out.push_str(&format!("  method {method} {}\n", Type::Fn(info.methods[method].clone())));
+        }
+    }
+    let mut names: Vec<&String> = an.enums.keys().collect();
+    names.sort();
+    for name in names {
+        out.push_str(&format!("enum {name}\n"));
+        for (variant, fields) in &an.enums[name] {
+            let mut line = format!("  variant {variant}");
+            for ty in fields {
+                line.push_str(&format!(" {ty}"));
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Does this block always leave: by `return` / `fail` / a diverging call, or,

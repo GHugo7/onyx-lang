@@ -13,8 +13,8 @@ it appears.
 | 1 | Lexer: source text to tokens (`compiler/lexer.ox`) | done |
 | 2 | Parser: tokens to a syntax tree (`compiler/parser.ox`, `compiler/ast.ox`) | done |
 | 3 | Modules: `import`, names across files (`compiler/modules.ox`) | done |
-| 4 | Type checker | next |
-| 5 | Native code generator and ELF writer | |
+| 4 | Type checker (`compiler/checker.ox`) | done |
+| 5 | Native code generator and ELF writer | next |
 | 6 | The Onyx compiler compiles itself | |
 
 ## Trying it
@@ -49,6 +49,17 @@ Built natively, the Onyx compiler parses the 4000 lines of the runtime in
 `onyx modules file` and `compiler/main.ox modules file` print the program
 once all its files are linked into one (stage 3); `tests/modules` holds a
 project made to exercise the awkward cases of imports.
+
+`onyx types file` and `compiler/main.ox types file` print what the type
+checker finds out (stage 4): the type of every expression, what each call
+calls, which bodies of code may wait, the signatures; or every problem,
+with its label and its help, word for word. Besides every file of the
+repository, the two checkers were compared on several hundred copies of
+them with one change each (a type replaced, a `?` removed, an argument
+added...), which makes them report errors of all kinds.
+
+Built natively, the Onyx checker checks the 6400 lines of the Onyx compiler
+in 62 ms; the Rust one takes 28 ms.
 
 ## How the two differ
 
