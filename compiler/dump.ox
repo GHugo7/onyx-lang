@@ -53,6 +53,9 @@ fn flag(b: bool) -> string {
 struct Dump {
     src: [int]
     lines: [string]
+    // Also print the id of every expression, and the exact bits of floats
+    // (as `onyx lowered` does).
+    ids: bool
 
     fn line(self, depth: int, text: string) {
         self.lines.push("  ".repeat(depth) + text)
@@ -270,12 +273,20 @@ struct Dump {
 
     fn expr(self, depth: int, e: ast.Expr) {
         var at = "{e.start}:{e.end}"
+        if self.ids {
+            at += " #{e.id}"
+        }
         match e.kind {
             Int(n) {
                 self.line(depth, "Int {n} {at}")
             }
-            Float(_) {
-                self.line(depth, "Float {lexer.text_of(self.src, e.start, e.end)} {at}")
+            Float(x) {
+                var line = "Float {lexer.text_of(self.src, e.start, e.end)} {at}"
+                if self.ids {
+                    // A float may have been computed by the compiler: its bits say exactly which.
+                    line += " bits={float_bits(x)}"
+                }
+                self.line(depth, line)
             }
             Bool(b) {
                 self.line(depth, "Bool {flag(b)} {at}")

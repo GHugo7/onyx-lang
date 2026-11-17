@@ -228,3 +228,19 @@ enum ExprKind {
     // `lo..hi`
     Range(lo: Expr, hi: Expr)
 }
+
+// ---- for the passes that rewrite the tree ----
+
+// A new node with the same id, position and content as `e`: what `e` was,
+// before it is overwritten.
+fn copy_of(e: Expr) -> Expr {
+    return Expr{id: e.id, start: e.start, end: e.end, kind: e.kind}
+}
+
+// Makes `e` the node `other` is, id included, where `e` stands in the tree.
+fn overwrite(e: Expr, other: Expr) {
+    e.id = other.id
+    e.start = other.start
+    e.end = other.end
+    e.kind = other.kind
+}

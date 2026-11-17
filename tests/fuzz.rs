@@ -9,6 +9,7 @@
 //!
 //!     ONYX_FUZZ_SEEDS=5000 cargo test --release --test fuzz
 //!     ONYX_FUZZ_START=1234 ONYX_FUZZ_SEEDS=1 cargo test --test fuzz   # replay one seed
+//!     ONYX_FUZZ_SAVE=dir ONYX_FUZZ_SEEDS=500 cargo test --test fuzz    # only write the programs
 //!
 //! A failing program is kept in `target/fuzz/` for inspection.
 //!
@@ -2351,6 +2352,15 @@ fn env_number(name: &str, default: u64) -> u64 {
 fn native_matches_javascript_on_random_programs() {
     let start = env_number("ONYX_FUZZ_START", 1);
     let count = env_number("ONYX_FUZZ_SEEDS", 40);
+    // `ONYX_FUZZ_SAVE=dir`: only write the programs into `dir`, to feed other
+    // checks (such as the comparison of the two compilers), without running them.
+    if let Ok(save) = std::env::var("ONYX_FUZZ_SAVE") {
+        std::fs::create_dir_all(&save).unwrap();
+        for seed in start..start + count {
+            std::fs::write(Path::new(&save).join(format!("seed_{seed}.ox")), Gen::program(seed)).unwrap();
+        }
+        return;
+    }
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join("fuzz");
     std::fs::create_dir_all(&dir).unwrap();
 

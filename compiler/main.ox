@@ -1,11 +1,16 @@
 // The Onyx compiler, written in Onyx. (In progress: see docs/selfhost.md.)
 
+import "capture"
 import "checker"
+import "desugar"
 import "diag"
 import "dump"
 import "lexer"
+import "lower"
 import "modules"
+import "optimize"
 import "parser"
+import "widen"
 
 // Prints what the lexer makes of a file, one token per line, in the same
 // form as `onyx tokens` of the compiler written in Rust.
@@ -64,7 +69,7 @@ fn dump_ast(path: string) -> void! {
         }
         return
     }
-    var out = dump.Dump{src: src, lines: []}
+    var out = dump.Dump{src: src, lines: [], ids: false}
     out.program(program)
     for line in out.lines {
         print(line)
@@ -75,7 +80,7 @@ fn dump_ast(path: string) -> void! {
 // as `onyx modules` of the compiler written in Rust.
 fn dump_modules(path: string) {
     var report = diag.new_report()
-    var linked = modules.load(path, report) catch err {
+    var linked = modules.load(path, false, report) catch err {
         if err.message == "fatal" {
             print("fatal")
         }
@@ -84,7 +89,7 @@ fn dump_modules(path: string) {
         }
         return
     }
-    var out = dump.Dump{src: linked.sources.bytes, lines: []}
+    var out = dump.Dump{src: linked.sources.bytes, lines: [], ids: false}
     out.program(linked.program)
     for line in out.lines {
         print(line)
@@ -106,7 +111,7 @@ fn print_diag(d: diag.Diag) {
 // as `onyx types` of the compiler written in Rust.
 fn dump_types(path: string) {
     var report = diag.new_report()
-    var linked = modules.load(path, report) catch err {
+    var linked = modules.load(path, false, report) catch err {
         if err.message == "fatal" {
             print("fatal")
         }
@@ -126,8 +131,55 @@ fn dump_types(path: string) {
     }
 }
 
+// Prints the program as the native code generator receives it, in the same
+// form as `onyx lowered` of the compiler written in Rust.
+fn dump_lowered(path: string) {
+    var report = diag.new_report()
+    var linked = modules.load(path, true, report) catch err {
+        if err.message == "fatal" {
+            print("fatal")
+        }
+        for d in report.diags {
+            print_diag(d)
+        }
+        return
+    }
+    var program = linked.program
+    var an = checker.check(program, linked.sources.bytes, true, linked.runtime_start, linked.runtime_end, report) catch err {
+        for d in report.diags {
+            print_diag(d)
+        }
+        return
+    }
+    desugar.desugar(program, an)
+    optimize.optimize(program)
+    widen.widen(program, an)
+    capture.capture(program, an)
+    lower.lower(program, an)
+    var out = dump.Dump{src: linked.sources.bytes, lines: [], ids: true}
+    out.program(program)
+    for line in out.lines {
+        print(line)
+    }
+    for line in checker.dump(an) {
+        print(line)
+    }
+    for id in an.captures.keys().sort() {
+        var shown: [string] = []
+        for c in an.captures[id] {
+            shown.push(c.name + ": " + checker.show(c.ty))
+        }
+        print("captures {id} " + shown.join(", "))
+    }
+    print("forks {an.has_forks}")
+}
+
 fn main() -> void! {
     var arguments = args()
+    if arguments.len() == 2 && arguments[0] == "lowered" {
+        dump_lowered(arguments[1])
+        return
+    }
     if arguments.len() == 2 && arguments[0] == "types" {
         dump_types(arguments[1])
         return
@@ -144,6 +196,6 @@ fn main() -> void! {
         dump_tokens(arguments[1])?
         return
     }
-    print("usage: tokens <file.ox> | ast <file.ox> | modules <file.ox> | types <file.ox>")
+    print("usage: tokens <file.ox> | ast <file.ox> | modules <file.ox> | types <file.ox> | lowered <file.ox>")
     exit(2)
 }

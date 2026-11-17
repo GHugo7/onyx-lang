@@ -163,8 +163,10 @@ fn test_files_are_found_and_run() {
 /// against the one written in Rust, on every Onyx file of the repository
 /// (its own source included): stage 1, the lexer, must give the same tokens,
 /// stage 2, the parser, the same syntax tree, stage 3, the module loader,
-/// the same linked program (see tests/modules), and stage 4, the type
-/// checker, the same analysis; or all of them the same errors.
+/// the same linked program (see tests/modules), stage 4, the type checker,
+/// the same analysis, and the passes that prepare the program for the code
+/// generator the same rewritten program (see tests/native/rewrites.ox); or
+/// all of them the same errors.
 #[test]
 fn onyx_compiler_agrees_with_the_rust_compiler() {
     let exe = std::env::temp_dir().join(format!("onyx-selfhost-{}", std::process::id()));
@@ -184,7 +186,7 @@ fn onyx_compiler_agrees_with_the_rust_compiler() {
     }
     assert!(files.len() > 100);
     for file in files {
-        for stage in ["tokens", "ast", "modules", "types"] {
+        for stage in ["tokens", "ast", "modules", "types", "lowered"] {
             let expected = Command::new(ONYX).arg(stage).arg(&file).output().unwrap();
             let found = Command::new(&exe).arg(stage).arg(&file).output().unwrap();
             assert_eq!(

@@ -197,6 +197,17 @@ struct Analysis {
     enums: map<string, [Variant]>
     // Expressions that make a value of an enum.
     variants: map<int, VariantRef>
+    // Filled in for the native target: for each lambda, the variables of
+    // the functions around it that it uses, with their types.
+    captures: map<int, [Captured]>
+    // Filled in for the native target: the program starts tasks with `fork`.
+    has_forks: bool
+}
+
+// A variable that a lambda uses, and its type.
+struct Captured {
+    name: string
+    ty: Type
 }
 
 fn fn_key(name: string) -> string {
@@ -2951,7 +2962,9 @@ fn check(program: ast.Program, src: [int], require_main: bool, runtime_start: in
             fallible_calls: {},
             widened: {},
             enums: {},
-            variants: {}
+            variants: {},
+            captures: {},
+            has_forks: false
         }
     }
     c.push_scope()

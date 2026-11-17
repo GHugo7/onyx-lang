@@ -14,7 +14,8 @@ it appears.
 | 2 | Parser: tokens to a syntax tree (`compiler/parser.ox`, `compiler/ast.ox`) | done |
 | 3 | Modules: `import`, names across files (`compiler/modules.ox`) | done |
 | 4 | Type checker (`compiler/checker.ox`) | done |
-| 5 | Native code generator and ELF writer | next |
+| 5a | Preparation for the code generator: `match` rewritten, constants computed, conversions, captured variables, `?` (`compiler/desugar.ox`, `optimize.ox`, `widen.ox`, `capture.ox`, `lower.ox`) | done |
+| 5b | Native code generator and ELF writer | next |
 | 6 | The Onyx compiler compiles itself | |
 
 ## Trying it
@@ -61,6 +62,35 @@ added...), which makes them report errors of all kinds.
 Built natively, the Onyx checker checks the 6400 lines of the Onyx compiler
 in 62 ms; the Rust one takes 28 ms.
 
+`onyx lowered file` and `compiler/main.ox lowered file` print the program as
+the native code generator receives it (stage 5a): with the runtime added,
+checked, then rewritten by the passes that come before the code generator.
+
+- `desugar`: every `match` becomes `if` / `else` tests on `__tag` (which
+  variant a value is) and `__field` (what it carries).
+- `optimize`: constant expressions are computed (`2 * 60` is `120`), short
+  `const` values are copied where they are used, branches that can never run
+  are removed.
+- `widen`: an `int` used where a `float` is expected is converted
+  (`sqrt(n)` is `sqrt(float(n))`).
+- `capture`: what each lambda uses from the functions around it; a variable
+  that a lambda changes moves into a box shared by both, and `fork { ... }`
+  becomes a lambda handed to the runtime.
+- `lower`: every `?` is moved to the root of a statement, what is computed
+  before it going into temporary variables, so that a failure leaves nothing
+  half-built.
+
+The dump shows every expression with its id, every float with its exact
+bits, the type of every expression, and what each lambda captures: both
+compilers must make the same new nodes, with the same ids, in the same
+order. Besides every file of the repository, they were compared on 2300
+programs made by the fuzzer (`ONYX_FUZZ_SAVE=dir` writes them out), and
+`tests/native/rewrites.ox` goes through every rewrite on purpose.
+
+On the Onyx compiler itself (9700 lines, plus the 4000 of the runtime),
+the whole stage, printing included, takes 140 ms built natively; the Rust
+compiler takes 120 ms.
+
 ## How the two differ
 
 - The Onyx lexer accepts any character outside ASCII in a name; the Rust
@@ -69,6 +99,10 @@ in 62 ms; the Rust one takes 28 ms.
   whether two imports name the same one; the Onyx compiler tidies the path
   up itself (`a/./b/../c.ox` is `a/c.ox`). They only disagree when symbolic
   links are involved.
+- Built for the JavaScript target, the Onyx compiler cannot hold integers
+  beyond 2^53 exactly (JavaScript numbers have 53 bits): the 64-bit
+  constants of the runtime and the bits of floats come out rounded in
+  `lowered`. The native build is the one that counts.
 
 ## The runtime
 

@@ -799,12 +799,19 @@ struct Resolver {
 struct Linked {
     program: ast.Program
     sources: Sources
+    // Where the source of the runtime is in `sources` (-1 when it was not added).
+    runtime_start: int
+    runtime_end: int
 }
 
-// Loads `entry` and everything it imports. Fails with "fatal" when the
-// entry file cannot be read, with something else after noting the problems
-// in `report`.
-fn load(entry: string, report: diag.Report) -> Linked! {
+// The runtime of the native target, written in Onyx: added to the program
+// when it is compiled to machine code.
+const RUNTIME = embed("../src/native/runtime.ox")
+
+// Loads `entry` and everything it imports, followed by the runtime when
+// `with_runtime`. Fails with "fatal" when the entry file cannot be read,
+// with something else after noting the problems in `report`.
+fn load(entry: string, with_runtime: bool, report: diag.Report) -> Linked! {
     var data = read_bytes(entry) catch err {
         fail "fatal"
     }
@@ -847,11 +854,24 @@ fn load(entry: string, report: diag.Report) -> Linked! {
             }
         }
     }
+    var runtime_start = -1
+    var runtime_end = -1
+    if with_runtime {
+        // Parsed after everything else, with no imports to resolve.
+        var text = bytes(RUNTIME)
+        runtime_start = loader.sources.add("<onyx runtime>", text)
+        runtime_end = runtime_start + text.len()
+        var prelude = parser.parse(loader.sources.bytes, runtime_start, runtime_end, loader.next_id, report)?
+        for item in prelude.items {
+            items.push(item)
+        }
+    }
     if report.diags.len() > 0 {
         report.diags = report.diags.sort_by(fn(d: diag.Diag) -> int {
             return d.start
         })
         fail "modules"
     }
-    return Linked{program: ast.Program{items: items, next_id: loader.next_id}, sources: loader.sources}
+    var program = ast.Program{items: items, next_id: loader.next_id}
+    return Linked{program: program, sources: loader.sources, runtime_start: runtime_start, runtime_end: runtime_end}
 }
