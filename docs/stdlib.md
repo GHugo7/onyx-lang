@@ -62,6 +62,26 @@ The operators are also functions: `bit_and`, `bit_or`, `bit_xor`, `bit_not`,
 | `file_exists(path: string) -> bool` | |
 | `fetch(url: string) -> string!` | HTTP GET; fails on network errors and non-2xx statuses |
 
+## Files read when compiling
+
+| Function | Description |
+| --- | --- |
+| `embed(path: string) -> string` | The text of a file, read when the program is compiled |
+
+`embed("data/words.txt")` is replaced by the text of the file, as if it had
+been written in the program as a string. The path is relative to the file
+that contains `embed`, like an import, and must be written as a plain string.
+The program does not need the file any more when it runs: an executable made
+with `onyx build` carries the text in it.
+
+```onyx
+const HELP = embed("help.txt")
+
+fn main() {
+    print(HELP)
+}
+```
+
 ## Time
 
 | Function | Description |

@@ -148,7 +148,7 @@ fn module_base(stem: string) -> string {
 
 // The built-in functions, which a module may not define again.
 fn is_builtin(name: string) -> bool {
-    var names = ["print", "str", "int", "float", "abs", "min", "max", "weak", "parse_int", "parse_float",
+    var names = ["print", "str", "int", "float", "abs", "min", "max", "weak", "embed", "parse_int", "parse_float",
         "read_file", "write_file", "append_file", "file_exists", "args", "env", "exit", "sleep", "now", "random",
         "random_int", "input", "fetch", "expect", "panic", "sqrt", "bit_and", "bit_or", "bit_xor", "shift_left",
         "shift_right", "bit_not", "ord", "chr", "bytes", "from_bytes", "read_bytes", "write_bytes", "pow",
@@ -167,6 +167,8 @@ struct Module {
     items: [ast.Item]
     // Import alias -> module number.
     imports: map<string, int>
+    // The folder of the file, to read what it embeds.
+    dir: string
 }
 
 // The top-level names of a module, before prefixing.
@@ -225,7 +227,7 @@ struct Loader {
         var idx = self.modules.len()
         self.by_path[path] = idx
         var imports: map<string, int> = {}
-        self.modules.push(Module{name: name, items: [], imports: imports})
+        self.modules.push(Module{name: name, items: [], imports: imports, dir: dir_of(path)})
         self.absorb(idx, dir_of(path), program)?
         self.order.push(idx)
         return idx
@@ -326,6 +328,7 @@ struct Resolver {
     infos: [ModInfo]
     me: int
     imports: map<string, int>
+    dir: string
     // Local variables in scope; they hide top-level names and imports.
     scopes: [map<string, bool>]
     report: diag.Report
@@ -371,6 +374,63 @@ struct Resolver {
             var d = self.report.add("E0401", "`{name}` is private to its module", start, end)
             d.help = "names starting with `_` can only be used in the file that defines them"
         }
+    }
+
+    // `embed("file")`: the text of the file, read when the program is
+    // compiled, as a string literal. The path is relative to the file that
+    // contains the call, like an import. Returns whether `e` was one.
+    fn embed(self, e: ast.Expr) -> bool {
+        var args: [ast.Expr] = []
+        match e.kind {
+            Call(callee, call_args) {
+                match callee.kind {
+                    Ident(name) {
+                        if name != "embed" || self.is_local(name) {
+                            return false
+                        }
+                    }
+                    else {
+                        return false
+                    }
+                }
+                args = call_args
+            }
+            else {
+                return false
+            }
+        }
+        var path = ""
+        if args.len() == 1 {
+            match args[0].kind {
+                Str(parts) {
+                    if parts.len() == 1 {
+                        match parts[0] {
+                            Lit(text) {
+                                path = text
+                            }
+                            else {
+                            }
+                        }
+                    }
+                }
+                else {
+                }
+            }
+        }
+        if path == "" {
+            var d = self.report.add("E0104", "`embed` takes the path of a file, written as a plain string", e.start, e.end)
+            d.help = "for example `embed(\"data/words.txt\")`"
+            return true
+        }
+        var file = join(self.dir, path)
+        var data = read_bytes(file) catch err {
+            var d = self.report.add("E0400", "cannot read the file \"{path}\"", e.start, e.end)
+            d.label = "no such file"
+            d.help = "the path is relative to the file that contains `embed`; looked for `{file}`"
+            return true
+        }
+        e.kind = ast.ExprKind.Str([ast.StrPart.Lit(from_bytes(data))])
+        return true
     }
 
     // Resolves a type or struct name, possibly written `module.Name`.
@@ -626,7 +686,7 @@ struct Resolver {
     }
 
     fn expr(self, e: ast.Expr) {
-        if self.module_item(e) {
+        if self.module_item(e) || self.embed(e) {
             return
         }
         match e.kind {
@@ -766,7 +826,7 @@ fn load(entry: string, report: diag.Report) -> Linked! {
     var items: [ast.Item] = []
     for idx in loader.order {
         var module = loader.modules[idx]
-        var resolver = Resolver{infos: infos, me: idx, imports: module.imports, scopes: [], report: report}
+        var resolver = Resolver{infos: infos, me: idx, imports: module.imports, dir: module.dir, scopes: [], report: report}
         for item in module.items {
             resolver.item(item)
         }

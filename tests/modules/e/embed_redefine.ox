@@ -1,0 +1,5 @@
+fn embed() {
+}
+
+fn main() {
+}

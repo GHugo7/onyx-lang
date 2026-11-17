@@ -1,0 +1,3 @@
+line one
+say "hi" {x} \ end
+accents: été

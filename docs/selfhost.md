@@ -70,9 +70,16 @@ in 62 ms; the Rust one takes 28 ms.
   up itself (`a/./b/../c.ox` is `a/c.ox`). They only disagree when symbolic
   links are involved.
 
+## The runtime
+
+A native program needs the runtime (`src/native/runtime.ox`). The Rust
+compiler carries it in its executable; the Onyx compiler does the same with
+`embed`, a function of the language that the compiler replaces by the text
+of a file (see the [standard library](stdlib.md)).
+
 ## What the language gained for this
 
 Writing a compiler needs a few things that small programs can do without,
 and they were added first: enums and `match` (a syntax tree is made of
-them), operations on bits, `ord` / `chr`, and byte lists that can be read
-from and written to files (an executable is bytes).
+them), operations on bits, `ord` / `chr`, byte lists that can be read from
+and written to files (an executable is bytes), and `embed`.

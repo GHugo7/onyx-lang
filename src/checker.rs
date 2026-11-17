@@ -209,7 +209,7 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
 
 pub fn is_builtin(name: &str) -> bool {
     builtin_sig(name).is_some()
-        || matches!(name, "print" | "str" | "int" | "float" | "abs" | "min" | "max" | "weak")
+        || matches!(name, "print" | "str" | "int" | "float" | "abs" | "min" | "max" | "weak" | "embed")
 }
 
 const BUILTIN_TYPES: &[&str] = &["int", "float", "bool", "string", "void", "error", "map"];

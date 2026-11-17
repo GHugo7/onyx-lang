@@ -356,7 +356,7 @@ fn builtin_sig(name: string) -> BuiltinSig! {
 }
 
 fn is_builtin(name: string) -> bool {
-    if ["print", "str", "int", "float", "abs", "min", "max", "weak"].contains(name) {
+    if ["print", "str", "int", "float", "abs", "min", "max", "weak", "embed"].contains(name) {
         return true
     }
     builtin_sig(name) catch err {

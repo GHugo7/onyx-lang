@@ -18,6 +18,10 @@ struct Module {
     items: Vec<Item>,
     /// Import alias -> module index.
     imports: HashMap<String, usize>,
+    /// The folder of the file, to read what it embeds, and the same folder as
+    /// messages name it.
+    dir: PathBuf,
+    shown_dir: PathBuf,
 }
 
 /// The top-level names of a module, before prefixing.
@@ -128,7 +132,15 @@ pub fn load(
     let order = loader.order.clone();
     for idx in order {
         let module = &mut loader.modules[idx];
-        let mut resolver = Resolver { infos: &infos, me: idx, imports: &module.imports, scopes: Vec::new(), diags: &mut diags };
+        let mut resolver = Resolver {
+            infos: &infos,
+            me: idx,
+            imports: &module.imports,
+            dir: &module.dir,
+            shown_dir: &module.shown_dir,
+            scopes: Vec::new(),
+            diags: &mut diags,
+        };
         for item in &mut module.items {
             resolver.item(item);
         }
@@ -192,7 +204,13 @@ impl<'a> Loader<'a> {
         let idx = self.modules.len();
         let dir = canonical.parent().map(Path::to_path_buf).unwrap_or_default();
         self.by_path.insert(canonical, idx);
-        self.modules.push(Module { name, items: Vec::new(), imports: HashMap::new() });
+        self.modules.push(Module {
+            name,
+            items: Vec::new(),
+            imports: HashMap::new(),
+            dir: dir.clone(),
+            shown_dir: shown_dir.clone(),
+        });
         self.absorb(idx, dir, shown_dir, program)?;
         self.order.push(idx);
         Ok(idx)
@@ -266,6 +284,8 @@ struct Resolver<'a> {
     infos: &'a [ModInfo],
     me: usize,
     imports: &'a HashMap<String, usize>,
+    dir: &'a Path,
+    shown_dir: &'a Path,
     /// Local variables in scope; they hide top-level names and imports.
     scopes: Vec<HashSet<String>>,
     diags: &'a mut Vec<Diagnostic>,
@@ -297,6 +317,38 @@ impl<'a> Resolver<'a> {
                 Diagnostic::new("E0401", format!("`{name}` is private to its module"), span)
                     .help("names starting with `_` can only be used in the file that defines them"),
             );
+        }
+    }
+
+    /// `embed("file")`: the text of the file, read when the program is
+    /// compiled, as a string literal. The path is relative to the file that
+    /// contains the call, like an import.
+    fn embed(&mut self, args: &[Expr], span: Span) -> Option<ExprKind> {
+        let path = match args {
+            [Expr { kind: ExprKind::Str(parts), .. }] => match parts.as_slice() {
+                [StrPart::Lit(path)] => path.clone(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        if path.is_empty() {
+            self.diags.push(
+                Diagnostic::new("E0104", "`embed` takes the path of a file, written as a plain string", span)
+                    .help("for example `embed(\"data/words.txt\")`"),
+            );
+            return None;
+        }
+        let shown = tidy(&self.shown_dir.join(&path));
+        match std::fs::read_to_string(self.dir.join(&path)) {
+            Ok(text) => Some(ExprKind::Str(vec![StrPart::Lit(text)])),
+            Err(_) => {
+                self.diags.push(
+                    Diagnostic::new("E0400", format!("cannot read the file \"{path}\""), span)
+                        .label("no such file")
+                        .help(format!("the path is relative to the file that contains `embed`; looked for `{shown}`")),
+                );
+                None
+            }
         }
     }
 
@@ -513,6 +565,14 @@ impl<'a> Resolver<'a> {
                         return;
                     }
                 }
+            }
+        }
+        if let ExprKind::Call { callee, args } = &e.kind {
+            if matches!(&callee.kind, ExprKind::Ident(name) if name == "embed" && !self.is_local(name)) {
+                if let Some(text) = self.embed(args, e.span) {
+                    e.kind = text;
+                }
+                return;
             }
         }
         match &mut e.kind {
