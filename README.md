@@ -39,8 +39,9 @@ fn main() {
 }
 ```
 
-The compiler is written in Rust with no dependencies. Source files use the
-`.ox` extension.
+The compiler is written in Rust with no dependencies, and also in Onyx:
+[that one](docs/selfhost.md) compiles itself into the very same executable.
+Source files use the `.ox` extension.
 
 > **Status: v0.1, early.** The language core works and is tested. Programs
 > compile to JavaScript, and an experimental [native target](docs/native.md)
@@ -214,7 +215,9 @@ cargo test        # runs every program in tests/, every example in the docs,
 The pipeline is `lexer.rs` → `parser.rs` → `modules.rs` (imports) →
 `checker.rs` → `optimize.rs` (constant folding, dead code) → `codegen_js.rs`,
 with the JavaScript runtime in `src/runtime.js`. The native backend lives in
-`src/native` and its runtime is written in Onyx (`src/native/runtime.ox`). To add a test, drop a `.ox`
+`src/native` and its runtime is written in Onyx (`src/native/runtime.ox`).
+The same compiler written in Onyx lives in `compiler/` (see
+[the compiler in Onyx](docs/selfhost.md)). To add a test, drop a `.ox`
 file and its expected `.out` in `tests/run`, or a program that must be rejected
 in `tests/errors` with `// error: E....` on its first line.
 

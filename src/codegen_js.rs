@@ -739,6 +739,7 @@ impl<'a> Gen<'a> {
             "write_file" => format!("$rt.writeFile({a})"),
             "append_file" => format!("$rt.appendFile({a})"),
             "file_exists" => format!("$rt.fileExists({a})"),
+            "set_executable" => format!("$rt.setExecutable({a})"),
             "args" => "$rt.args()".to_string(),
             "env" => format!("$rt.env({a})"),
             "exit" => format!("$rt.exit({a})"),

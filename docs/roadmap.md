@@ -38,8 +38,12 @@ for what works today.
 9. **Tasks and channels** (done): `fork`, channels and `sleep`, with a
    scheduler written in Onyx. The native target now covers the whole
    language, except `fetch`.
-10. **Self-hosting** (in progress): the compiler rewritten in Onyx, stage
-    by stage. See [the compiler in Onyx](selfhost.md).
+10. **Self-hosting** (done): the compiler rewritten in Onyx, stage by
+    stage. It compiles itself, into the very same executable as the Rust
+    compiler makes of it. See [the compiler in Onyx](selfhost.md).
+11. **The `onyx` command in Onyx** (next): `run`, `test`, `check`,
+    `explain` and errors shown with their source, so that the compiler
+    written in Onyx can replace the one written in Rust everywhere.
 
 ## Later
 

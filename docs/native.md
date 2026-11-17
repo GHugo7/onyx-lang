@@ -54,7 +54,7 @@ The native target is being built up step by step. It currently supports:
 - `print`, `str`, `parse_int`, `abs`, `min`, `max`, `exit`, `panic`
 - `fork`, channels (`chan<T>()`, `ch <- v`, `<-ch`, `close`, `for v in ch`)
 - the outside world: `read_file`, `write_file`, `append_file`,
-  `file_exists`, `args`, `env`, `input`, `now`, `sleep`
+  `file_exists`, `set_executable`, `args`, `env`, `input`, `now`, `sleep`
 - modules (`import`)
 
 The one thing left out is `fetch`, which is rejected with error

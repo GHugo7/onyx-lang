@@ -3205,6 +3205,16 @@ fn __rt_write_file(path: string, text: string, flags: int) -> void! {
     __syscall(3, fd, 0, 0, 0, 0, 0)
 }
 
+// Lets the file be run as a program: rwxr-xr-x (0o755 is 493).
+fn __rt_set_executable(path: string) -> void! {
+    var name = __rt_to_c(path)
+    var result = __syscall(90, name, 493, 0, 0, 0, 0)     // chmod
+    __rt_free(name, __rt_c_size(path))
+    if result < 0 {
+        fail "cannot change " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(result)
+    }
+}
+
 fn __rt_file_exists(path: string) -> bool {
     var name = __rt_to_c(path)
     var found = __syscall(21, name, 0, 0, 0, 0, 0) == 0     // access

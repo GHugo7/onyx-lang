@@ -257,6 +257,9 @@ fn builtin_sig(name: string) -> BuiltinSig! {
         "file_exists" {
             return bsig([s], Type.Bool, false, false)
         }
+        "set_executable" {
+            return bsig([s], Type.Void, true, false)
+        }
         "args" {
             return bsig(none, Type.List(s), false, false)
         }

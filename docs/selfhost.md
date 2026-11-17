@@ -1,12 +1,12 @@
 # The compiler in Onyx
 
-The Onyx compiler is written in Rust (`src/`). The goal is a compiler
-written in Onyx itself (`compiler/`), able to compile its own source: from
-then on, Onyx needs nothing but Onyx.
+The Onyx compiler was first written in Rust (`src/`). It now also exists
+written in Onyx itself (`compiler/`), and that one compiles its own source:
+Onyx needs nothing but Onyx.
 
-It is built stage by stage. Each stage is checked against the Rust compiler
-on every Onyx file of the repository, so that a difference shows up the day
-it appears.
+It was built stage by stage. Each stage was checked against the Rust
+compiler on every Onyx file of the repository, so that a difference showed
+up the day it appeared; `cargo test` keeps checking all of them.
 
 | Stage | What | Status |
 | --- | --- | --- |
@@ -15,10 +15,56 @@ it appears.
 | 3 | Modules: `import`, names across files (`compiler/modules.ox`) | done |
 | 4 | Type checker (`compiler/checker.ox`) | done |
 | 5a | Preparation for the code generator: `match` rewritten, constants computed, conversions, captured variables, `?` (`compiler/desugar.ox`, `optimize.ox`, `widen.ox`, `capture.ox`, `lower.ox`) | done |
-| 5b | Native code generator and ELF writer | next |
-| 6 | The Onyx compiler compiles itself | |
+| 5b | Native code generator, register planning, assembler, executable file (`compiler/gen.ox`, `plan.ox`, `asm.ox`, `elf.ox`) | done |
+| 6 | The Onyx compiler compiles itself | done |
 
-## Trying it
+## Building programs with it
+
+The Rust compiler builds the first one:
+
+```bash
+onyx build --target native compiler/main.ox -o oxc
+```
+
+Then `oxc` compiles Onyx programs to Linux executables, alone:
+
+```bash
+./oxc build examples/hello.ox -o hello
+```
+
+```bash
+./hello
+```
+
+The executable is the very same file, byte for byte, as the one
+`onyx build --target native` writes: same machine code, same constants,
+same layout. That holds for every program of the repository that the
+native target compiles, and for 2300 programs written by the fuzzer; a
+program the Rust compiler refuses, `oxc` refuses too. `--leak-check` works
+the same way (`./oxc build --leak-check f.ox -o f`).
+
+And it compiles itself:
+
+```bash
+./oxc build compiler/main.ox -o oxc2
+```
+
+`oxc2` is `oxc`, byte for byte, and so is what `oxc2` makes of the same
+source: a fixed point. From there on, the Rust compiler is only needed to
+make the very first `oxc`. The 9700 lines of the compiler, plus the 4000 of
+the runtime, compile in a quarter of a second, into a 794 KB executable.
+
+## What it does not do yet
+
+`oxc` is a complete native compiler, but the `onyx` command does more:
+
+- `run`, `test`, `check` and `explain`: `oxc` has `build`, and the commands
+  that print what each stage does (below);
+- the JavaScript target;
+- errors are printed in a plain form (`error E0201 120:125 message`, then
+  the label and the help), without the excerpt of the source.
+
+## Looking at each stage
 
 ```bash
 onyx run --target native compiler/main.ox tokens examples/hello.ox
@@ -116,4 +162,7 @@ of a file (see the [standard library](stdlib.md)).
 Writing a compiler needs a few things that small programs can do without,
 and they were added first: enums and `match` (a syntax tree is made of
 them), operations on bits, `ord` / `chr`, byte lists that can be read from
-and written to files (an executable is bytes), and `embed`.
+and written to files (an executable is bytes), and `embed`. Then, for the
+code generator: numbers written in hexadecimal (`0x8B`, an opcode, reads
+better than `139`) and `set_executable`, so that what `oxc` writes can be
+run.

@@ -5,6 +5,7 @@ import "checker"
 import "desugar"
 import "diag"
 import "dump"
+import "gen"
 import "lexer"
 import "lower"
 import "modules"
@@ -174,8 +175,57 @@ fn dump_lowered(path: string) {
     print("forks {an.has_forks}")
 }
 
+// Compiles a program to an executable for Linux x86-64, as
+// `onyx build --target native` does: the same bytes.
+fn build(path: string, out: string, leak_check: bool) -> bool {
+    var report = diag.new_report()
+    var linked = modules.load(path, true, report) catch err {
+        if err.message == "fatal" {
+            print("cannot read `{path}`")
+        }
+        for d in report.diags {
+            print_diag(d)
+        }
+        return false
+    }
+    var program = linked.program
+    var an = checker.check(program, linked.sources.bytes, true, linked.runtime_start, linked.runtime_end, report) catch err {
+        for d in report.diags {
+            print_diag(d)
+        }
+        return false
+    }
+    desugar.desugar(program, an)
+    optimize.optimize(program)
+    widen.widen(program, an)
+    capture.capture(program, an)
+    lower.lower(program, an)
+    var executable = gen.generate(program, an, leak_check, report) catch err {
+        for d in report.diags {
+            print_diag(d)
+        }
+        return false
+    }
+    write_bytes(out, executable) catch err {
+        print(err.message)
+        return false
+    }
+    set_executable(out) catch err {
+        print(err.message)
+        return false
+    }
+    return true
+}
+
 fn main() -> void! {
     var arguments = args()
+    if arguments.len() >= 4 && arguments[0] == "build" && arguments[arguments.len() - 2] == "-o" {
+        var leak_check = arguments.contains("--leak-check")
+        if !build(arguments[arguments.len() - 3], arguments[arguments.len() - 1], leak_check) {
+            exit(1)
+        }
+        return
+    }
     if arguments.len() == 2 && arguments[0] == "lowered" {
         dump_lowered(arguments[1])
         return
@@ -196,6 +246,6 @@ fn main() -> void! {
         dump_tokens(arguments[1])?
         return
     }
-    print("usage: tokens <file.ox> | ast <file.ox> | modules <file.ox> | types <file.ox> | lowered <file.ox>")
+    print("usage: tokens <file.ox> | ast <file.ox> | modules <file.ox> | types <file.ox> | lowered <file.ox> | build [--leak-check] <file.ox> -o <out>")
     exit(2)
 }

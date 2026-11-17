@@ -3778,6 +3778,7 @@ impl<'a> Gen<'a> {
                 self.call_rt_fallible("__rt_write_file", &[Arg::Borrow(&args[0]), Arg::Borrow(&args[1]), Arg::Const(flags)], false);
             }
             "file_exists" => self.call_rt("__rt_file_exists", &[Arg::Borrow(&args[0])], true),
+            "set_executable" => self.call_rt_fallible("__rt_set_executable", &[Arg::Borrow(&args[0])], false),
             "input" => self.call_rt("__rt_input", &[Arg::Borrow(&args[0])], true),
             "now" => self.call_rt("__rt_now", &[], true),
             "sleep" if self.an.has_forks => self.call_rt("__rt_task_sleep", &[Arg::Value(&args[0])], false),

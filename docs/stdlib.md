@@ -61,6 +61,7 @@ The operators are also functions: `bit_and`, `bit_or`, `bit_xor`, `bit_not`,
 | `write_file(path: string, text: string) -> void!` | Replaces the file |
 | `append_file(path: string, text: string) -> void!` | |
 | `file_exists(path: string) -> bool` | |
+| `set_executable(path: string) -> void!` | Lets the file be run as a program (Linux, macOS) |
 | `fetch(url: string) -> string!` | HTTP GET; fails on network errors and non-2xx statuses |
 
 ## Files read when compiling

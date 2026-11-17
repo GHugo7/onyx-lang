@@ -200,6 +200,49 @@ fn onyx_compiler_agrees_with_the_rust_compiler() {
     let _ = std::fs::remove_file(&exe);
 }
 
+/// The rest of the compiler written in Onyx (stage 5) writes the same
+/// executables as the one written in Rust, for every program the native
+/// target compiles, and refuses the same ones. Its own source included
+/// (stage 6): built by itself, it is the very same file, byte for byte.
+#[test]
+fn onyx_compiler_writes_the_same_executables() {
+    let dir = std::env::temp_dir().join(format!("onyx-selfhost-build-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("oxc");
+    let built = Command::new(ONYX).args(["build", "--target", "native", "compiler/main.ox", "-o"]).arg(&exe).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let mut files = Vec::new();
+    let mut dirs = vec![PathBuf::from("compiler"), PathBuf::from("examples"), PathBuf::from("tests"), PathBuf::from("benchmarks")];
+    while let Some(d) = dirs.pop() {
+        for entry in std::fs::read_dir(&d).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "ox") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let (expected, found) = (dir.join("expected"), dir.join("found"));
+    let mut compared = 0;
+    for file in &files {
+        let rust = Command::new(ONYX).args(["build", "--target", "native"]).arg(file).arg("-o").arg(&expected).output().unwrap();
+        let onyx = Command::new(&exe).arg("build").arg(file).arg("-o").arg(&found).output().unwrap();
+        assert_eq!(onyx.status.success(), rust.status.success(), "{}: {}", file.display(), String::from_utf8_lossy(&onyx.stdout));
+        if rust.status.success() {
+            assert!(std::fs::read(&expected).unwrap() == std::fs::read(&found).unwrap(), "{} is not built the same", file.display());
+            compared += 1;
+        }
+    }
+    assert!(compared > 40);
+    // The compiler compiles itself into itself.
+    let again = Command::new(&exe).args(["build", "compiler/main.ox", "-o"]).arg(&found).output().unwrap();
+    assert!(again.status.success(), "{}", String::from_utf8_lossy(&again.stdout));
+    assert!(std::fs::read(&exe).unwrap() == std::fs::read(&found).unwrap(), "the compiler does not build itself into itself");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 mod native {
     use super::*;
 

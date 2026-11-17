@@ -318,6 +318,7 @@ const $rt = (() => {
   const writeBytes = (path, list) => fsCall("write", path, (fs) => void fs.writeFileSync(path, Buffer.from(list)));
   const appendFile = (path, text) => fsCall("write", path, (fs) => void fs.appendFileSync(path, text));
   const fileExists = (path) => isNode && require("node:fs").existsSync(path);
+  const setExecutable = (path) => fsCall("change", path, (fs) => void fs.chmodSync(path, 0o755));
   const args = () => (isNode ? process.argv.slice(2) : []);
   const env = (name) => {
     const v = isNode ? process.env[name] : undefined;
@@ -401,7 +402,7 @@ const $rt = (() => {
   return {
     OnyxError, Chan, CLOSED, panic, fail, str, fstr, print, idiv, imod, idx, setIdx, mapGet, eq,
     or, orAsync, pass, passAsync, caught, fork, sleep, run, runTests, expect, parseInt_, parseFloat_, readFile,
-    writeFile, appendFile, fileExists, args, env, exit, input, fetch_, randomInt, list, strIdx,
+    writeFile, appendFile, fileExists, setExecutable, args, env, exit, input, fetch_, randomInt, list, strIdx,
     repeat, replace, split, mapTryGet, weak, weakGet, noWeak, bitAnd, bitOr, bitXor, shiftLeft, shiftRight, bitNot, ord, chr, bytes, fromBytes, floatBits, floatFromBits,
     readBytes, writeBytes,
     setWriter: (w) => (write = w),

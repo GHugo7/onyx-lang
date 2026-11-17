@@ -166,6 +166,7 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "write_file" => (vec![Str, Str], Void, true, false),
         "append_file" => (vec![Str, Str], Void, true, false),
         "file_exists" => (vec![Str], Bool, false, false),
+        "set_executable" => (vec![Str], Void, true, false),
         "args" => (vec![], list_str(), false, false),
         "env" => (vec![Str], Str, true, false),
         "exit" => (vec![Int], Void, false, false),
