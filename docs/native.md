@@ -51,10 +51,12 @@ The native target is being built up step by step. It currently supports:
 - strings: interpolation, `+`, `+=`, comparisons, `s[i]`, `for c in s`, and
   the methods `len`, `upper`, `lower`, `trim`, `contains`, `starts_with`,
   `ends_with`, `index_of`, `slice`, `replace`, `split`, `chars`, `repeat`
-- `print`, `str`, `parse_int`, `abs`, `min`, `max`, `exit`, `panic`
+- `print`, `eprint`, `str`, `parse_int`, `abs`, `min`, `max`, `exit`, `panic`
 - `fork`, channels (`chan<T>()`, `ch <- v`, `<-ch`, `close`, `for v in ch`)
 - the outside world: `read_file`, `write_file`, `append_file`,
-  `file_exists`, `set_executable`, `args`, `env`, `input`, `now`, `sleep`
+  `file_exists`, `set_executable`, `remove_file`, `is_dir`, `list_dir`,
+  `make_dir`, `remove_dir`, `run_program`, `stdout_is_terminal`,
+  `stderr_is_terminal`, `args`, `env`, `input`, `now`, `sleep`
 - modules (`import`)
 
 The one thing left out is `fetch`, which is rejected with error

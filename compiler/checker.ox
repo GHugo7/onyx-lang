@@ -257,8 +257,20 @@ fn builtin_sig(name: string) -> BuiltinSig! {
         "file_exists" {
             return bsig([s], Type.Bool, false, false)
         }
-        "set_executable" {
+        "set_executable", "remove_file", "remove_dir", "make_dir" {
             return bsig([s], Type.Void, true, false)
+        }
+        "list_dir" {
+            return bsig([s], Type.List(s), true, false)
+        }
+        "is_dir" {
+            return bsig([s], Type.Bool, false, false)
+        }
+        "run_program" {
+            return bsig([s, Type.List(s)], Type.Int, true, false)
+        }
+        "stdout_is_terminal", "stderr_is_terminal" {
+            return bsig(none, Type.Bool, false, false)
         }
         "args" {
             return bsig(none, Type.List(s), false, false)
@@ -373,7 +385,7 @@ fn builtin_sig(name: string) -> BuiltinSig! {
 }
 
 fn is_builtin(name: string) -> bool {
-    if ["print", "str", "int", "float", "abs", "min", "max", "weak", "embed"].contains(name) {
+    if ["print", "eprint", "str", "int", "float", "abs", "min", "max", "weak", "embed"].contains(name) {
         return true
     }
     builtin_sig(name) catch err {
@@ -2581,7 +2593,7 @@ struct Checker {
             arg_types.push(self.expr(a, Type.Unknown))
         }
         match name {
-            "print" {
+            "print", "eprint" {
                 for i in 0..args.len() {
                     if arg_types[i] == Type.Void {
                         self.err("E0102", "this expression does not produce a value", args[i].start, args[i].end)

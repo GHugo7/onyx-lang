@@ -1,0 +1,17 @@
+true true false
+["a.txt", "b.txt", "sub"] ["c.txt"]
+false true
+["b.txt", "sub"] false
+cannot remove "<dir>/a.txt": no such file or directory
+cannot create "<dir>/b.txt": file exists
+cannot read "<dir>/b.txt": not a directory
+cannot remove "<dir>/sub": directory not empty
+before the program
+from sh
+3
+0
+-9
+cannot run "no-such-program-anywhere": no such file or directory
+cannot run "<dir>/b.txt": permission denied
+false false
+false

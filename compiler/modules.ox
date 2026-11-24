@@ -148,8 +148,9 @@ fn module_base(stem: string) -> string {
 
 // The built-in functions, which a module may not define again.
 fn is_builtin(name: string) -> bool {
-    var names = ["print", "str", "int", "float", "abs", "min", "max", "weak", "embed", "parse_int", "parse_float",
-        "read_file", "write_file", "append_file", "file_exists", "set_executable", "args", "env", "exit", "sleep", "now", "random",
+    var names = ["print", "eprint", "str", "int", "float", "abs", "min", "max", "weak", "embed", "parse_int", "parse_float",
+        "read_file", "write_file", "append_file", "file_exists", "set_executable", "remove_file", "remove_dir", "make_dir", "list_dir", "is_dir", "run_program",
+        "stdout_is_terminal", "stderr_is_terminal", "args", "env", "exit", "sleep", "now", "random",
         "random_int", "input", "fetch", "expect", "panic", "sqrt", "bit_and", "bit_or", "bit_xor", "shift_left",
         "shift_right", "bit_not", "ord", "chr", "bytes", "from_bytes", "read_bytes", "write_bytes", "pow",
         "floor", "ceil", "round", "float_bits", "float_from_bits", "__syscall", "__load8", "__load32", "__load64", "__store8", "__store32",

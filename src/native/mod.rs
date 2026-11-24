@@ -3693,7 +3693,7 @@ impl<'a> Gen<'a> {
 
     fn builtin(&mut self, name: &str, e: &Expr, args: &[Expr]) {
         match name {
-            "print" => {
+            "print" | "eprint" => {
                 // print(a, b) writes "a b" and a line break; interpolated
                 // strings are written piece by piece, without being built.
                 let mut pieces: Vec<Piece> = Vec::new();
@@ -3722,7 +3722,7 @@ impl<'a> Gen<'a> {
                 self.asm.mov(RAX, RSP);
                 self.asm.push(RAX);
                 self.asm.push_imm(pieces.len() as i32);
-                self.call_runtime("__rt_print_pieces", 2);
+                self.call_runtime(if name == "print" { "__rt_print_pieces" } else { "__rt_eprint_pieces" }, 2);
                 self.drop_pieces(pushed, false);
             }
             "str" => {
@@ -3779,6 +3779,14 @@ impl<'a> Gen<'a> {
             }
             "file_exists" => self.call_rt("__rt_file_exists", &[Arg::Borrow(&args[0])], true),
             "set_executable" => self.call_rt_fallible("__rt_set_executable", &[Arg::Borrow(&args[0])], false),
+            "remove_file" => self.call_rt_fallible("__rt_remove_file", &[Arg::Borrow(&args[0])], false),
+            "remove_dir" => self.call_rt_fallible("__rt_remove_dir", &[Arg::Borrow(&args[0])], false),
+            "make_dir" => self.call_rt_fallible("__rt_make_dir", &[Arg::Borrow(&args[0])], false),
+            "list_dir" => self.call_rt_fallible("__rt_list_dir", &[Arg::Borrow(&args[0]), Arg::Descriptor(self.ty(e))], true),
+            "is_dir" => self.call_rt("__rt_is_dir", &[Arg::Borrow(&args[0])], true),
+            "run_program" => self.call_rt_fallible("__rt_run_program", &[Arg::Borrow(&args[0]), Arg::Borrow(&args[1])], true),
+            "stdout_is_terminal" => self.call_rt("__rt_is_terminal", &[Arg::Const(1)], true),
+            "stderr_is_terminal" => self.call_rt("__rt_is_terminal", &[Arg::Const(2)], true),
             "input" => self.call_rt("__rt_input", &[Arg::Borrow(&args[0])], true),
             "now" => self.call_rt("__rt_now", &[], true),
             "sleep" if self.an.has_forks => self.call_rt("__rt_task_sleep", &[Arg::Value(&args[0])], false),

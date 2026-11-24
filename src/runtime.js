@@ -60,6 +60,7 @@ const $rt = (() => {
 
   let write = (line) => console.log(line);
   const print = (...parts) => write(parts.join(" "));
+  const eprint = (...parts) => console.error(parts.join(" "));
 
   // ---- operators ----
   const idiv = (a, b) => (b === 0 ? panic("division by zero") : Math.trunc(a / b));
@@ -308,6 +309,8 @@ const $rt = (() => {
         EISDIR: "is a directory",
         ENOTDIR: "not a directory",
         ENOSPC: "no space left on device",
+        EEXIST: "file exists",
+        ENOTEMPTY: "directory not empty",
       };
       fail("cannot " + what + " " + repr(path) + ": " + (reasons[e.code] || e.message));
     }
@@ -319,6 +322,29 @@ const $rt = (() => {
   const appendFile = (path, text) => fsCall("write", path, (fs) => void fs.appendFileSync(path, text));
   const fileExists = (path) => isNode && require("node:fs").existsSync(path);
   const setExecutable = (path) => fsCall("change", path, (fs) => void fs.chmodSync(path, 0o755));
+  const removeFile = (path) => fsCall("remove", path, (fs) => void fs.unlinkSync(path));
+  const removeDir = (path) => fsCall("remove", path, (fs) => void fs.rmdirSync(path));
+  const makeDir = (path) => fsCall("create", path, (fs) => void fs.mkdirSync(path, { recursive: true }));
+  // Sorted by their bytes, as on the native target.
+  const byBytes = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
+  const listDir = (path) => fsCall("read", path, (fs) => fs.readdirSync(path).sort(byBytes));
+  const isDir = (path) => {
+    try {
+      return isNode && require("node:fs").statSync(path).isDirectory();
+    } catch (e) {
+      return false;
+    }
+  };
+  // The exit code of the program, or minus the number of the signal that stopped it.
+  const runProgram = (path, list) => {
+    const r = node("node:child_process").spawnSync(path, list, { stdio: "inherit" });
+    if (r.error) {
+      const reasons = { ENOENT: "no such file or directory", EACCES: "permission denied", ENOEXEC: "exec format error" };
+      fail("cannot run " + repr(path) + ": " + (reasons[r.error.code] || r.error.message));
+    }
+    return r.signal ? -node("node:os").constants.signals[r.signal] : r.status;
+  };
+  const isTerminal = (fd) => isNode && Boolean((fd === 1 ? process.stdout : process.stderr).isTTY);
   const args = () => (isNode ? process.argv.slice(2) : []);
   const env = (name) => {
     const v = isNode ? process.env[name] : undefined;
@@ -400,9 +426,9 @@ const $rt = (() => {
   const mapTryGet = (m, k) => (m.has(k) ? m.get(k) : fail("key not found: " + repr(k)));
 
   return {
-    OnyxError, Chan, CLOSED, panic, fail, str, fstr, print, idiv, imod, idx, setIdx, mapGet, eq,
+    OnyxError, Chan, CLOSED, panic, fail, str, fstr, print, eprint, idiv, imod, idx, setIdx, mapGet, eq,
     or, orAsync, pass, passAsync, caught, fork, sleep, run, runTests, expect, parseInt_, parseFloat_, readFile,
-    writeFile, appendFile, fileExists, setExecutable, args, env, exit, input, fetch_, randomInt, list, strIdx,
+    writeFile, appendFile, fileExists, setExecutable, removeFile, removeDir, makeDir, listDir, isDir, runProgram, isTerminal, args, env, exit, input, fetch_, randomInt, list, strIdx,
     repeat, replace, split, mapTryGet, weak, weakGet, noWeak, bitAnd, bitOr, bitXor, shiftLeft, shiftRight, bitNot, ord, chr, bytes, fromBytes, floatBits, floatFromBits,
     readBytes, writeBytes,
     setWriter: (w) => (write = w),

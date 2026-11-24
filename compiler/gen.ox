@@ -5044,7 +5044,7 @@ struct Gen {
     }
 
     fn builtin(self, name: string, e: ast.Expr, args: [ast.Expr]) {
-        if name == "print" {
+        if name == "print" || name == "eprint" {
             // print(a, b) writes "a b" and a line break; interpolated
             // strings are written piece by piece, without being built.
             var pieces: [Piece] = []
@@ -5075,7 +5075,11 @@ struct Gen {
             self.asm.mov(RAX, RSP)
             self.asm.push(RAX)
             self.asm.push_imm(pieces.len())
-            self.call_runtime("__rt_print_pieces", 2)
+            if name == "print" {
+                self.call_runtime("__rt_print_pieces", 2)
+            } else {
+                self.call_runtime("__rt_eprint_pieces", 2)
+            }
             self.drop_pieces(pushed, false)
         } else if name == "str" {
             if self.ty(args[0]) == checker.Type.Str {
@@ -5133,6 +5137,22 @@ struct Gen {
             self.call_rt("__rt_file_exists", [Arg.Borrow(args[0])], true)
         } else if name == "set_executable" {
             self.call_rt_fallible("__rt_set_executable", [Arg.Borrow(args[0])], false)
+        } else if name == "remove_file" {
+            self.call_rt_fallible("__rt_remove_file", [Arg.Borrow(args[0])], false)
+        } else if name == "remove_dir" {
+            self.call_rt_fallible("__rt_remove_dir", [Arg.Borrow(args[0])], false)
+        } else if name == "make_dir" {
+            self.call_rt_fallible("__rt_make_dir", [Arg.Borrow(args[0])], false)
+        } else if name == "list_dir" {
+            self.call_rt_fallible("__rt_list_dir", [Arg.Borrow(args[0]), Arg.Descriptor(self.ty(e))], true)
+        } else if name == "is_dir" {
+            self.call_rt("__rt_is_dir", [Arg.Borrow(args[0])], true)
+        } else if name == "run_program" {
+            self.call_rt_fallible("__rt_run_program", [Arg.Borrow(args[0]), Arg.Borrow(args[1])], true)
+        } else if name == "stdout_is_terminal" {
+            self.call_rt("__rt_is_terminal", [Arg.Const(1)], true)
+        } else if name == "stderr_is_terminal" {
+            self.call_rt("__rt_is_terminal", [Arg.Const(2)], true)
         } else if name == "input" {
             self.call_rt("__rt_input", [Arg.Borrow(args[0])], true)
         } else if name == "now" {

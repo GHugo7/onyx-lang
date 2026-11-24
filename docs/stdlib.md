@@ -8,10 +8,12 @@ means the call can fail and must be handled with `?`, `or` or `catch`.
 | Function | Description |
 | --- | --- |
 | `print(values...)` | Prints the values separated by spaces, then a new line |
+| `eprint(values...)` | The same, on the error output (where error messages go) |
 | `input(prompt: string) -> string` | Reads one line from the keyboard |
 | `args() -> [string]` | Command-line arguments |
 | `env(name: string) -> string!` | Reads an environment variable |
 | `exit(code: int)` | Ends the program |
+| `stdout_is_terminal() -> bool`, `stderr_is_terminal() -> bool` | Whether the output (or the error output) goes to a terminal, rather than to a file or another program: colors only make sense there |
 
 ## Conversions
 
@@ -53,16 +55,42 @@ The operators are also functions: `bit_and`, `bit_or`, `bit_xor`, `bit_not`,
 | `random() -> float` | Between 0 (included) and 1 (excluded) |
 | `random_int(lo: int, hi: int) -> int` | Between `lo` and `hi`, both included |
 
-## Files and network
+## Files, folders and network
 
 | Function | Description |
 | --- | --- |
 | `read_file(path: string) -> string!` | |
 | `write_file(path: string, text: string) -> void!` | Replaces the file |
 | `append_file(path: string, text: string) -> void!` | |
-| `file_exists(path: string) -> bool` | |
+| `file_exists(path: string) -> bool` | A file or a folder |
+| `remove_file(path: string) -> void!` | |
 | `set_executable(path: string) -> void!` | Lets the file be run as a program (Linux, macOS) |
+| `is_dir(path: string) -> bool` | Whether `path` is a folder |
+| `list_dir(path: string) -> [string]!` | The names of what a folder holds, sorted |
+| `make_dir(path: string) -> void!` | Creates a folder, and the folders around it that are missing; one that exists already is fine |
+| `remove_dir(path: string) -> void!` | Removes a folder, which must be empty |
 | `fetch(url: string) -> string!` | HTTP GET; fails on network errors and non-2xx statuses |
+
+## Other programs
+
+| Function | Description |
+| --- | --- |
+| `run_program(path: string, args: [string]) -> int!` | Runs a program and waits for it to end |
+
+`run_program` gives the program's exit code (0 when all went well), or
+minus the number of the signal that stopped it (`-9` when it was killed).
+What it prints appears among what the program that started it prints. A
+name without a `/` is looked for in the folders of `PATH`, as in a shell:
+
+```onyx
+fn main() -> void! {
+    var code = run_program("ls", ["-l"])?
+    print("ls ended with code {code}")
+}
+```
+
+It fails when the program cannot be started (not found, not allowed to
+run).
 
 ## Files read when compiling
 

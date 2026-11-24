@@ -167,6 +167,13 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
         "append_file" => (vec![Str, Str], Void, true, false),
         "file_exists" => (vec![Str], Bool, false, false),
         "set_executable" => (vec![Str], Void, true, false),
+        "remove_file" => (vec![Str], Void, true, false),
+        "remove_dir" => (vec![Str], Void, true, false),
+        "make_dir" => (vec![Str], Void, true, false),
+        "list_dir" => (vec![Str], list_str(), true, false),
+        "is_dir" => (vec![Str], Bool, false, false),
+        "run_program" => (vec![Str, list_str()], Int, true, false),
+        "stdout_is_terminal" | "stderr_is_terminal" => (vec![], Bool, false, false),
         "args" => (vec![], list_str(), false, false),
         "env" => (vec![Str], Str, true, false),
         "exit" => (vec![Int], Void, false, false),
@@ -211,7 +218,7 @@ fn builtin_sig(name: &str) -> Option<(Vec<Type>, Type, bool, bool)> {
 
 pub fn is_builtin(name: &str) -> bool {
     builtin_sig(name).is_some()
-        || matches!(name, "print" | "str" | "int" | "float" | "abs" | "min" | "max" | "weak" | "embed")
+        || matches!(name, "print" | "eprint" | "str" | "int" | "float" | "abs" | "min" | "max" | "weak" | "embed")
 }
 
 const BUILTIN_TYPES: &[&str] = &["int", "float", "bool", "string", "void", "error", "map"];
@@ -1867,7 +1874,7 @@ impl<'a> Checker<'a> {
             }
         };
         match name {
-            "print" => {
+            "print" | "eprint" => {
                 for (t, a) in arg_types.iter().zip(args) {
                     if *t == Type::Void {
                         self.err(Diagnostic::new("E0102", "this expression does not produce a value", a.span));

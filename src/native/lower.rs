@@ -173,7 +173,7 @@ impl<'a> Lower<'a> {
 
     /// The receiver and the arguments of a call.
     fn call_operands(&mut self, call: &mut Expr, out: &mut Vec<Stmt>) {
-        if matches!(self.an.calls.get(&call.id), Some(CallKind::Builtin(name)) if name == "print" || name == "str") {
+        if matches!(self.an.calls.get(&call.id), Some(CallKind::Builtin(name)) if name == "print" || name == "eprint" || name == "str") {
             if let ExprKind::Call { args, .. } = &mut call.kind {
                 self.shown(args.iter_mut().collect(), out);
             }

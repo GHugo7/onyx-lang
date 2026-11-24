@@ -3138,6 +3138,15 @@ fn __rt_reason(code: int) -> string {
     if code == -28 {
         return "no space left on device"
     }
+    if code == -17 {
+        return "file exists"
+    }
+    if code == -39 {
+        return "directory not empty"
+    }
+    if code == -8 {
+        return "exec format error"
+    }
     return "system error " + __rt_int_str(-code)
 }
 
@@ -3213,6 +3222,191 @@ fn __rt_set_executable(path: string) -> void! {
     if result < 0 {
         fail "cannot change " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(result)
     }
+}
+
+fn __rt_remove_file(path: string) -> void! {
+    var name = __rt_to_c(path)
+    var result = __syscall(87, name, 0, 0, 0, 0, 0)       // unlink
+    __rt_free(name, __rt_c_size(path))
+    if result < 0 {
+        fail "cannot remove " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(result)
+    }
+}
+
+// Removes a folder, which must be empty.
+fn __rt_remove_dir(path: string) -> void! {
+    var name = __rt_to_c(path)
+    var result = __syscall(84, name, 0, 0, 0, 0, 0)       // rmdir
+    __rt_free(name, __rt_c_size(path))
+    if result < 0 {
+        fail "cannot remove " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(result)
+    }
+}
+
+fn __rt_is_dir(path: string) -> bool {
+    var name = __rt_to_c(path)
+    var info = __rt_alloc(144)                            // struct stat
+    var result = __syscall(4, name, info, 0, 0, 0, 0)     // stat
+    var mode = __load32(info + 24)
+    __rt_free(info, 144)
+    __rt_free(name, __rt_c_size(path))
+    return result == 0 && __and(mode, 0xF000) == 0x4000
+}
+
+// Creates a folder, and the folders it is in when they are missing. A
+// folder that is already there is fine.
+fn __rt_make_dir(path: string) -> void! {
+    var p = __str_ptr(path)
+    var n = __load32(p + 8)
+    var name = __rt_to_c(path)
+    // The parents first: the path is cut at each slash in turn.
+    var i = 1
+    while i < n {
+        if __load8(name + i) == 47 {
+            __store8(name + i, 0)
+            __syscall(83, name, 493, 0, 0, 0, 0)          // mkdir, rwxr-xr-x
+            __store8(name + i, 47)
+        }
+        i += 1
+    }
+    var result = __syscall(83, name, 493, 0, 0, 0, 0)
+    __rt_free(name, __rt_c_size(path))
+    if result < 0 && !(result == -17 && __rt_is_dir(path)) {
+        fail "cannot create " + __rt_quote(p) + ": " + __rt_reason(result)
+    }
+}
+
+// The names in a folder, sorted, without `.` and `..`.
+fn __rt_list_dir(path: string, td: int) -> int! {
+    var name = __rt_to_c(path)
+    var fd = __syscall(2, name, 0x90000, 0, 0, 0, 0)      // open, O_DIRECTORY | O_CLOEXEC
+    __rt_free(name, __rt_c_size(path))
+    if fd < 0 {
+        fail "cannot read " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(fd)
+    }
+    var found = __rt_list_new(td, 0)
+    var buffer = __rt_alloc(4096)
+    var got = __syscall(217, fd, buffer, 4096, 0, 0, 0)    // getdents64
+    while got > 0 {
+        // Each entry: inode (8 bytes), position (8), size of the entry (2),
+        // kind (1), then the name, ending with a zero.
+        var at = 0
+        while at < got {
+            var entry = buffer + at
+            var text = entry + 19
+            var dots = __load8(text) == 46 && (__load8(text + 1) == 0 || (__load8(text + 1) == 46 && __load8(text + 2) == 0))
+            if !dots {
+                __rt_list_push(found, __rt_from_c(text))
+            }
+            at += __and(__load32(entry + 16), 0xFFFF)
+        }
+        got = __syscall(217, fd, buffer, 4096, 0, 0, 0)
+    }
+    __rt_free(buffer, 4096)
+    __syscall(3, fd, 0, 0, 0, 0, 0)                       // close
+    if got < 0 {
+        __rt_release(found)
+        fail "cannot read " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(got)
+    }
+    var sorted = __rt_list_sort(found)
+    __rt_release(found)
+    return sorted
+}
+
+// Whether a file can be started as a program.
+fn __rt_can_run(path: string) -> bool {
+    var name = __rt_to_c(path)
+    var allowed = __syscall(21, name, 1, 0, 0, 0, 0) == 0    // access, X_OK
+    __rt_free(name, __rt_c_size(path))
+    return allowed && !__rt_is_dir(path)
+}
+
+// Runs a program and waits for it to end: its exit code, or minus the
+// number of the signal that stopped it. A name without `/` is looked for in
+// the folders of PATH, as a shell does.
+fn __rt_run_program(path: string, args: [string]) -> int! {
+    var program = path
+    if !path.contains("/") {
+        program = ""
+        for dir in (env("PATH") or "/usr/local/bin:/usr/bin:/bin").split(":") {
+            if program == "" && dir != "" && __rt_can_run(dir + "/" + path) {
+                program = dir + "/" + path
+            }
+        }
+        if program == "" {
+            fail "cannot run " + __rt_quote(__str_ptr(path)) + ": no such file or directory"
+        }
+    }
+    // What the kernel wants: the addresses of zero-ended strings, the
+    // program first, then a zero; and the environment, as it was given.
+    var count = args.len() + 1
+    var argv = __rt_alloc((count + 1) * 8)
+    __store64(argv, __rt_to_c(program))
+    var i = 1
+    while i < count {
+        __store64(argv + i * 8, __rt_to_c(args[i - 1]))
+        i += 1
+    }
+    __store64(argv + count * 8, 0)
+    var start = __load64(__state() + __S_START)
+    var environment = start + 8 + (__load64(start) + 1) * 8
+    // A pipe that closes by itself when the program starts: if it does not
+    // start, the child writes why into it.
+    var scratch = __rt_alloc(8)
+    __syscall(293, scratch, 0x80000, 0, 0, 0, 0)          // pipe2, O_CLOEXEC
+    var reader = __load32(scratch)
+    var writer = __load32(scratch + 4)
+    // What was printed so far comes before what the program prints.
+    __rt_flush()
+    var pid = __syscall(57, 0, 0, 0, 0, 0, 0)             // fork
+    if pid == 0 {
+        __syscall(3, reader, 0, 0, 0, 0, 0)
+        var failure = __syscall(59, __load64(argv), argv, environment, 0, 0, 0)    // execve
+        __store64(scratch, failure)
+        __syscall(1, writer, scratch, 8, 0, 0, 0)
+        __syscall(231, 127, 0, 0, 0, 0, 0)                // exit_group
+    }
+    __syscall(3, writer, 0, 0, 0, 0, 0)
+    var why = pid
+    var status = 0
+    if pid > 0 {
+        why = 0
+        if __syscall(0, reader, scratch, 8, 0, 0, 0) == 8 {
+            why = __load64(scratch)
+        }
+        // wait4, again when a signal interrupts it.
+        var waited = -4
+        while waited == -4 {
+            waited = __syscall(61, pid, scratch, 0, 0, 0, 0)
+        }
+        status = __load32(scratch)
+    }
+    __syscall(3, reader, 0, 0, 0, 0, 0)
+    __rt_free(__load64(argv), __rt_c_size(program))
+    i = 1
+    while i < count {
+        __rt_free(__load64(argv + i * 8), __rt_c_size(args[i - 1]))
+        i += 1
+    }
+    __rt_free(argv, (count + 1) * 8)
+    __rt_free(scratch, 8)
+    if why < 0 {
+        fail "cannot run " + __rt_quote(__str_ptr(path)) + ": " + __rt_reason(why)
+    }
+    var signal = __and(status, 0x7F)
+    if signal != 0 {
+        return -signal
+    }
+    return __and(__shr(status, 8), 0xFF)
+}
+
+// Whether file descriptor `fd` is a terminal: ioctl(fd, TCGETS) only
+// succeeds on one.
+fn __rt_is_terminal(fd: int) -> bool {
+    var scratch = __rt_alloc(64)
+    var yes = __syscall(16, fd, 21505, scratch, 0, 0, 0) == 0
+    __rt_free(scratch, 64)
+    return yes
 }
 
 fn __rt_file_exists(path: string) -> bool {
@@ -3919,6 +4113,20 @@ fn __rt_print_pieces(pieces: int, n: int) {
     if __load64(__state() + __S_TERMINAL) == 1 {
         __rt_flush()
     }
+}
+
+// `eprint`: the same, on the error output, right away. What `print` wrote
+// before comes first.
+fn __rt_eprint_pieces(pieces: int, n: int) {
+    __rt_flush()
+    var i = n - 1
+    while i >= 0 {
+        var piece = __load64(pieces + i * 8)
+        __rt_write_all(2, piece + 16, __load32(piece + 8))
+        i -= 1
+    }
+    var newline = "\n"
+    __rt_write_all(2, __str_ptr(newline) + 16, 1)
 }
 
 // Writes a string right away, without the buffer (used for error messages).

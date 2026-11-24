@@ -715,9 +715,9 @@ impl<'a> Gen<'a> {
 
     fn builtin(&mut self, name: &str, e: &Expr, args: &[Expr]) -> String {
         match name {
-            "print" => {
+            "print" | "eprint" => {
                 let parts: Vec<String> = args.iter().map(|a| self.to_str(a)).collect();
-                return format!("$rt.print({})", parts.join(", "));
+                return format!("$rt.{name}({})", parts.join(", "));
             }
             "str" => return self.to_str(&args[0]),
             "expect" => {
@@ -740,6 +740,14 @@ impl<'a> Gen<'a> {
             "append_file" => format!("$rt.appendFile({a})"),
             "file_exists" => format!("$rt.fileExists({a})"),
             "set_executable" => format!("$rt.setExecutable({a})"),
+            "remove_file" => format!("$rt.removeFile({a})"),
+            "remove_dir" => format!("$rt.removeDir({a})"),
+            "make_dir" => format!("$rt.makeDir({a})"),
+            "list_dir" => format!("$rt.listDir({a})"),
+            "is_dir" => format!("$rt.isDir({a})"),
+            "run_program" => format!("$rt.runProgram({a})"),
+            "stdout_is_terminal" => "$rt.isTerminal(1)".to_string(),
+            "stderr_is_terminal" => "$rt.isTerminal(2)".to_string(),
             "args" => "$rt.args()".to_string(),
             "env" => format!("$rt.env({a})"),
             "exit" => format!("$rt.exit({a})"),

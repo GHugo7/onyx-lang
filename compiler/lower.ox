@@ -313,7 +313,7 @@ struct Lower {
         if self.an.calls.has(call.id) {
             match self.an.calls[call.id] {
                 Builtin(name) {
-                    if name == "print" || name == "str" {
+                    if name == "print" || name == "eprint" || name == "str" {
                         match call.kind {
                             Call(_, args) {
                                 self.shown(args, out)
