@@ -228,7 +228,7 @@ fn onyx_compiler_writes_the_same_executables() {
     let mut compared = 0;
     for file in &files {
         let rust = Command::new(ONYX).args(["build", "--target", "native"]).arg(file).arg("-o").arg(&expected).output().unwrap();
-        let onyx = Command::new(&exe).arg("build").arg(file).arg("-o").arg(&found).output().unwrap();
+        let onyx = Command::new(&exe).args(["build", "--target", "native"]).arg(file).arg("-o").arg(&found).output().unwrap();
         assert_eq!(onyx.status.success(), rust.status.success(), "{}: {}", file.display(), String::from_utf8_lossy(&onyx.stdout));
         if rust.status.success() {
             assert!(std::fs::read(&expected).unwrap() == std::fs::read(&found).unwrap(), "{} is not built the same", file.display());
@@ -237,9 +237,79 @@ fn onyx_compiler_writes_the_same_executables() {
     }
     assert!(compared > 40);
     // The compiler compiles itself into itself.
-    let again = Command::new(&exe).args(["build", "compiler/main.ox", "-o"]).arg(&found).output().unwrap();
+    let again = Command::new(&exe).args(["build", "--target", "native", "compiler/main.ox", "-o"]).arg(&found).output().unwrap();
     assert!(again.status.success(), "{}", String::from_utf8_lossy(&again.stdout));
     assert!(std::fs::read(&exe).unwrap() == std::fs::read(&found).unwrap(), "the compiler does not build itself into itself");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `onyx` command written in Onyx (compiler/main.ox) does what the one
+/// written in Rust does, to the byte: what it prints, its errors, its exit
+/// code and the files it writes, on both targets, for `run`, `build`,
+/// `check`, `test` (a file, its test file, a folder) and `explain`.
+#[test]
+fn onyx_command_in_onyx_behaves_the_same() {
+    let dir = std::env::temp_dir().join(format!("onyx-selfhost-command-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("oxc");
+    let built = Command::new(ONYX).args(["build", "--target", "native", "compiler/main.ox", "-o"]).arg(&exe).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+
+    let path = |p: &PathBuf| p.to_string_lossy().to_string();
+    let mut commands: Vec<Vec<String>> = Vec::new();
+    for file in programs("tests/run") {
+        commands.push(vec!["run".into(), path(&file)]);
+    }
+    for file in programs("tests/native") {
+        commands.push(vec!["run".into(), "--target".into(), "native".into(), "--leak-check".into(), path(&file)]);
+        commands.push(vec!["run".into(), path(&file)]);
+    }
+    for file in programs("tests/errors") {
+        commands.push(vec!["check".into(), path(&file)]);
+    }
+    let mut tested = programs("tests/testing");
+    tested.extend(programs("examples"));
+    for file in tested {
+        commands.push(vec!["test".into(), path(&file)]);
+        commands.push(vec!["test".into(), "--target".into(), "native".into(), path(&file)]);
+    }
+    for line in [
+        "test tests/testing",
+        "test --target native tests/testing",
+        "explain E0200",
+        "explain e0118",
+        "explain E9999",
+        "version",
+        "help",
+        "",
+        "frobnicate",
+        "check missing.ox",
+        "run --target jvm x.ox",
+        "build examples/hello.ox --frob",
+    ] {
+        commands.push(line.split_whitespace().map(String::from).collect());
+    }
+    for args in &commands {
+        let rust = Command::new(ONYX).args(args).output().unwrap();
+        let onyx = Command::new(&exe).args(args).output().unwrap();
+        let shown = args.join(" ");
+        assert_eq!(String::from_utf8_lossy(&onyx.stdout), String::from_utf8_lossy(&rust.stdout), "output of `onyx {shown}`");
+        assert_eq!(String::from_utf8_lossy(&onyx.stderr), String::from_utf8_lossy(&rust.stderr), "errors of `onyx {shown}`");
+        assert_eq!(onyx.status.code(), rust.status.code(), "exit code of `onyx {shown}`");
+    }
+
+    // `build`, to both targets.
+    for file in programs("examples") {
+        for target in ["js", "native"] {
+            let (expected, found) = (dir.join("expected"), dir.join("found"));
+            let rust = Command::new(ONYX).args(["build", "--target", target]).arg(&file).arg("-o").arg(&expected).output().unwrap();
+            let onyx = Command::new(&exe).args(["build", "--target", target]).arg(&file).arg("-o").arg(&found).output().unwrap();
+            assert_eq!(onyx.status.code(), rust.status.code(), "{}", file.display());
+            if rust.status.success() {
+                assert!(std::fs::read(&expected).unwrap() == std::fs::read(&found).unwrap(), "{} to {target}", file.display());
+            }
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

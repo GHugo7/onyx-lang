@@ -221,8 +221,9 @@ struct Loader {
     next_id: int
     used_names: map<string, bool>
 
-    fn load_file(self, path: string, name: string, data: [int]) -> int! {
-        var start = self.sources.add(path, data)
+    // `shown`: the path as messages show it.
+    fn load_file(self, path: string, shown: string, name: string, data: [int]) -> int! {
+        var start = self.sources.add(shown, data)
         var program = parser.parse(self.sources.bytes, start, start + data.len(), self.next_id, self.report)?
         self.next_id = program.next_id
         var idx = self.modules.len()
@@ -276,7 +277,7 @@ struct Loader {
                             n += 1
                         }
                         self.used_names[unique] = true
-                        target = self.load_file(file, unique, data)?
+                        target = self.load_file(file, file, unique, data)?
                     }
                     imports[name] = target
                 }
@@ -809,15 +810,28 @@ struct Linked {
 // when it is compiled to machine code.
 const RUNTIME = embed("../src/native/runtime.ox")
 
-// Loads `entry` and everything it imports, followed by the runtime when
-// `with_runtime`. Fails with "fatal" when the entry file cannot be read,
-// with something else after noting the problems in `report`.
 fn load(entry: string, with_runtime: bool, report: diag.Report) -> Linked! {
+    return load_with(entry, with_runtime, "", new_sources(), report)?
+}
+
+fn new_sources() -> Sources {
+    return Sources{bytes: [], files: []}
+}
+
+// Loads `entry` and everything it imports, followed by the runtime when
+// `with_runtime`. `companion`, when not "", is the test file of the entry
+// (`name.test.ox`): part of it, private names included. Fails with "fatal"
+// when the entry file cannot be read, with "fatal: <file>" when the
+// companion cannot, with something else after noting the problems in
+// `report`.
+// The files go into `sources`, which tells where a problem is even when
+// the program cannot be loaded.
+fn load_with(entry: string, with_runtime: bool, companion: string, sources: Sources, report: diag.Report) -> Linked! {
     var data = read_bytes(entry) catch err {
         fail "fatal"
     }
     var loader = Loader{
-        sources: Sources{bytes: [], files: []},
+        sources: sources,
         report: report,
         modules: [],
         by_path: {},
@@ -825,7 +839,18 @@ fn load(entry: string, with_runtime: bool, report: diag.Report) -> Linked! {
         next_id: 0,
         used_names: {}
     }
-    loader.load_file(join("", entry), "", data)?
+    var main = loader.load_file(join("", entry), entry, "", data)?
+    // A test file (`name.test.ox`) is part of the file it tests: it sees
+    // everything in it, private names included, without importing it.
+    if companion != "" {
+        var text = read_bytes(companion) catch err {
+            fail "fatal: " + companion
+        }
+        var start = loader.sources.add(companion, text)
+        var extra = parser.parse(loader.sources.bytes, start, start + text.len(), loader.next_id, report)?
+        loader.next_id = extra.next_id
+        loader.absorb(main, dir_of(join("", companion)), extra)?
+    }
 
     var infos: [ModInfo] = []
     for module in loader.modules {

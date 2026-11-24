@@ -41,9 +41,9 @@ for what works today.
 10. **Self-hosting** (done): the compiler rewritten in Onyx, stage by
     stage. It compiles itself, into the very same executable as the Rust
     compiler makes of it. See [the compiler in Onyx](selfhost.md).
-11. **The `onyx` command in Onyx** (next): `run`, `test`, `check`,
-    `explain` and errors shown with their source, so that the compiler
-    written in Onyx can replace the one written in Rust everywhere.
+11. **The `onyx` command in Onyx** (done): `run`, `build`, `check`,
+    `test`, `explain`, both targets, errors shown with their source. It
+    behaves exactly like the one written in Rust, and replaces it.
 
 ## Later
 

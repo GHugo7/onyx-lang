@@ -20,6 +20,8 @@ import "ast"
 import "checker"
 import "diag"
 import "elf"
+import "errors"
+import "modules"
 import "plan"
 
 // ---- registers and instructions (the numbers of asm.ox) ----
@@ -794,11 +796,15 @@ fn lambdas_in_expr(e: ast.Expr, out: [ast.Expr]) {
 
 // ---- the program ----
 
-// Compiles a checked program into an executable. Fails after noting the
-// problems in `report` (things the native target cannot do yet).
-fn generate(program: ast.Program, an: checker.Analysis, leak_check: bool, report: diag.Report) -> [int]! {
+// Compiles a checked program into an executable. With `tests`, the program
+// runs the `check` blocks instead of `main` (`sources` tells where a failed
+// `expect` is). Fails after noting the problems in `report` (things the
+// native target cannot do yet).
+fn generate(program: ast.Program, an: checker.Analysis, leak_check: bool, tests: bool, sources: modules.Sources, report: diag.Report) -> [int]! {
     var g = Gen{
         an: an,
+        tests: tests,
+        sources: sources,
         asm: asm.new_asm(),
         report: report,
         items: {},
@@ -836,6 +842,7 @@ fn generate(program: ast.Program, an: checker.Analysis, leak_check: bool, report
     // Every function gets a label. Its code is only generated when something refers to it.
     var global_order: [string] = []
     var lambdas: [ast.Expr] = []
+    var checks: [Check] = []
     for item in program.items {
         match item {
             Fn(f) {
@@ -865,6 +872,18 @@ fn generate(program: ast.Program, an: checker.Analysis, leak_check: bool, report
                     var captures: [checker.Captured] = []
                     var fn_item = FnItem{body: m.body, fallible: m.fallible, start: m.name_start, end: m.name_end, params: params, ret: sig.ret, captures: captures}
                     g.add_function(checker.method_key(s.name, m.name), fn_item)
+                }
+            }
+            // A `check` block is a function without parameters.
+            Check(name, body) {
+                if tests {
+                    lambdas_in(body, lambdas)
+                    var key = "check:" + str(checks.len())
+                    var no_params: [ParamInfo] = []
+                    var no_captures: [checker.Captured] = []
+                    var fn_item = FnItem{body: body, fallible: false, start: body.start, end: body.end, params: no_params, ret: checker.Type.Void, captures: no_captures}
+                    g.add_function(key, fn_item)
+                    checks.push(Check{key: key, name: name})
                 }
             }
             Global(stmt) {
@@ -949,7 +968,35 @@ fn generate(program: ast.Program, an: checker.Analysis, leak_check: bool, report
             }
         }
     }
-    if g.items.has("main") {
+    if tests {
+        // Each check runs in turn. Before it starts, the place to come back
+        // to is noted (the stack pointer and an address): a failed `expect`
+        // or a panic abandons the check by jumping there (`__unwind`).
+        g.asm.push_imm(checks.len())
+        g.call_runtime("__rt_checks_begin", 1)
+        for check in checks {
+            var escaped = g.asm.new_label()
+            var next = g.asm.new_label()
+            var name = g.string(check.name)
+            g.asm.lea(RAX, escaped)
+            g.asm.store(R15, TEST_RESUME, RAX)
+            g.asm.store(R15, TEST_STACK, RSP)
+            var label = g.function_label(check.key)
+            g.asm.call(label)
+            g.asm.lea(RAX, name)
+            g.asm.push(RAX)
+            g.call_runtime("__rt_check_passed", 1)
+            g.asm.jmp(next)
+            g.asm.bind(escaped)
+            g.asm.lea(RAX, name)
+            g.asm.push(RAX)
+            g.call_runtime("__rt_check_failed", 1)
+            g.asm.bind(next)
+        }
+        g.asm.store_imm(R15, TEST_STACK, 0)
+        g.asm.push_imm(checks.len())
+        g.call_runtime("__rt_checks_end", 1)
+    } else if g.items.has("main") {
         var can_fail = g.items["main"].fallible
         var label = g.function_label("main")
         g.asm.call(label)
@@ -966,7 +1013,7 @@ fn generate(program: ast.Program, an: checker.Analysis, leak_check: bool, report
         // `main` is done; the tasks it started may not be.
         g.call_runtime("__rt_finish", 0)
     }
-    if leak_check {
+    if leak_check && !tests {
         var i = global_order.len() - 1
         while i >= 0 {
             var global = g.globals[global_order[i]]
@@ -1015,6 +1062,10 @@ fn generate(program: ast.Program, an: checker.Analysis, leak_check: bool, report
 
 struct Gen {
     an: checker.Analysis
+    // In test mode: the `check` blocks run instead of `main`, and the
+    // sources say where an expectation failed.
+    tests: bool
+    sources: modules.Sources
     asm: asm.Asm
     report: diag.Report
     // Every function and method of the program, by name (or method key).
@@ -5094,9 +5145,16 @@ struct Gen {
         } else if name == "panic" {
             self.call_rt("__rt_panic", [Arg.Borrow(args[0])], false)
         } else if name == "expect" {
+            var where = "an `expect`"
+            if self.tests {
+                var loc = errors.locate(self.sources, e.start)
+                var parts = loc.file.split("/")
+                parts = parts[parts.len() - 1].split("\\")
+                where = parts[parts.len() - 1] + ":" + str(loc.line)
+            }
             var fine = self.asm.new_label()
             self.cond_jump(args[0], fine, true)
-            var place = self.string("an `expect`")
+            var place = self.string(where)
             self.asm.lea(RAX, place)
             self.asm.push(RAX)
             self.call_runtime("__rt_expect_failed", 1)

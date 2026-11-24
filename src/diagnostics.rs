@@ -141,44 +141,14 @@ pub fn render(d: &Diagnostic, sources: &SourceMap, color: bool) -> String {
     out
 }
 
-/// Long-form explanations, shown by `onyx explain <CODE>`.
+/// Long-form explanations of the error codes, shown by `onyx explain <CODE>`:
+/// the sections of docs/errors.md, which the compiler written in Onyx reads too.
+const EXPLANATIONS: &str = include_str!("../docs/errors.md");
+
 pub fn explain(code: &str) -> Option<&'static str> {
-    Some(match code {
-        "E0001" => "The source file contains a character that is not part of the Onyx language.",
-        "E0002" => "A string literal or block comment was opened but never closed.\n\nStrings start and end with a double quote: \"hello\".\nTo write a literal `{` inside a string, escape it: \"\\{\".",
-        "E0003" => "The parser found a token it did not expect. Check for a missing brace,\nparenthesis, comma or type annotation near the reported location.",
-        "E0100" => "A name was used that is not defined in the current scope.\n\nVariables must be declared with `var` or `const` before they are used,\nand functions must exist at the top level of the file.",
-        "E0101" => "A type name was used that does not exist.\n\nBuilt-in types are: int, float, bool, string, void, error, [T], map<K, V>,\nchan<T> and fn(A) -> R. Other types must be declared with `struct` or `interface`.",
-        "E0102" => "An expression has a different type from the one required.\n\nOnyx is statically typed: every value has one type, known at compile time.\nThe only implicit conversion is int -> float. Use int(x), float(x) or str(x)\nto convert explicitly.\n\n    var n: int = \"hello\"      // error\n    var n: int = parse_int(\"42\") or 0   // ok",
-        "E0103" => "The same name was defined twice in one scope.",
-        "E0104" => "A function was called with the wrong number of arguments.",
-        "E0105" => "Only functions and methods can be called.",
-        "E0106" => "The field or method does not exist on this type.",
-        "E0107" => "An operator was applied to types it does not support.\n\nArithmetic works on int and float, `+` also joins two strings,\n`&&`, `||` and `!` work on bool. To build a string from other values,\nuse interpolation: \"score: {n}\".",
-        "E0108" => "A `const` binding (or a loop variable) cannot be reassigned.\nDeclare it with `var` if it needs to change.",
-        "E0109" => "A function with a return type must return a value on every path.",
-        "E0110" => "The compiler could not infer a type, usually for an empty list `[]` or\nan empty map `{}`. Add a type annotation:\n\n    var names: [string] = []",
-        "E0111" => "`break` and `continue` can only be used inside a `while` or `for` loop.",
-        "E0112" => "A struct literal must give a value to every field, exactly once,\nand cannot mention fields that do not exist.",
-        "E0113" => "Map keys must be of type int, string or bool.",
-        "E0114" => "`for ... in` works on lists, strings, maps (keys), channels and ranges (a..b).",
-        "E0115" => "Only lists, maps and strings can be indexed with `[...]`.",
-        "E0116" => "A program needs an entry point:\n\n    fn main() {\n        print(\"hello\")\n    }",
-        "E0117" => "`return` cannot be used here (for example inside a `fork` block,\nwhich runs as a separate task).",
-        "E0118" => "A top-level variable was used before its value was computed.\n\nTop-level variables are initialised one after the other, from top to bottom,\nand the variables of an imported file are initialised before those of the file\nthat imports it. An initialiser may call functions; if one of them uses a\nvariable that comes later, it would see garbage, so the compiler refuses.\n\n    var total = compute()     // error: `compute` uses `base`...\n    var base = 10             // ...which only gets its value here\n\n    fn compute() -> int {\n        return base * 2\n    }\n\nMove `base` above `total`, or compute `total` inside a function.\n\nWhen two files import each other, the one that is run decides which file's\nvariables come first. Keeping initialisers free of calls into the other file\navoids the problem altogether.\n\nThe compiler follows every call that could happen, including calls through\ninterfaces and function values, so it may refuse a program that would have\nworked. Reordering the declarations always fixes it.",
-        "E0119" => "A `match` must say what happens for every value its subject can have.\n\nFor an enum, that is one case per variant, or an `else` for the rest:\n\n    match shape {\n        Circle(r) {\n            print(r)\n        }\n        else {\n            print(\"something else\")\n        }\n    }\n\nNumbers and strings have too many values to list: there an `else` is\nalways needed.",
-        "E0200" => "A function whose return type ends with `!` can fail. Onyx does not let you\nignore that: every call must say what happens on failure.\n\n    var data = read_file(\"a.txt\")?              // pass the error to my caller\n    var data = read_file(\"a.txt\") or \"\"         // use a default value\n    var data = read_file(\"a.txt\") catch err {   // handle it here\n        print(\"oops: {err}\")\n        return\n    }",
-        "E0201" => "`?` passes an error up to the caller, so it can only be used inside a\nfunction that can itself fail (its return type ends with `!`).\n\n    fn load() -> string! {\n        return read_file(\"a.txt\")?\n    }",
-        "E0202" => "`?`, `or` and `catch` handle the error of a call that can fail.\nHere the expression can never fail, so there is nothing to handle.\n\nNote that `or` has the lowest precedence; use parentheses when mixing it\nwith other operators: 1 + (parse_int(s) or 0)",
-        "E0203" => "`fail` reports an error to the caller, so it can only be used inside a\nfunction whose return type ends with `!`.",
-        "E0204" => "When a `catch` block is used to produce a value, it must either leave\n(return, fail, break, continue) or end with an expression of the right type.",
-        "E0205" => "`catch` blocks may contain statements such as `return`, so they are only\nallowed directly in a `var`, an assignment, a `return` or as a statement.\nUse `or` inside larger expressions.",
-        "E0206" => "The `!` marker is only valid on a function's return type.",
-        "E0400" => "An `import` names a file that does not exist or cannot be read.\n\nImport paths are relative to the file that contains the import, and the\n`.ox` extension is optional:\n\n    import \"utils\"            // ./utils.ox\n    import \"lib/geometry\"     // ./lib/geometry.ox",
-        "E0401" => "A module was asked for something it does not define, or for a private\nname. After `import \"utils\"`, the functions, variables and types of\nutils.ox are used as `utils.name`. Names starting with `_` stay private to\ntheir file.",
-        "E0402" => "Every import needs a distinct, valid name. By default it is the file name;\nchoose another one with `as`:\n\n    import \"lib/string-utils\" as strings",
-        "E0500" => "The native target (`--target native`) builds a real Linux executable\nwithout any other tool, but it does not support the whole language yet.\nThe same program runs on the JavaScript target with `onyx run`.",
-        "E0300" => "`<-` sends to and receives from channels only.",
-        _ => return None,
-    })
+    let heading = format!("\n## {code}\n");
+    let start = EXPLANATIONS.find(&heading)? + heading.len();
+    let rest = &EXPLANATIONS[start..];
+    let end = rest.find("\n## ").unwrap_or(rest.len());
+    Some(rest[..end].trim())
 }

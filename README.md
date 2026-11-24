@@ -40,7 +40,8 @@ fn main() {
 ```
 
 The compiler is written in Rust with no dependencies, and also in Onyx:
-[that one](docs/selfhost.md) compiles itself into the very same executable.
+[that one](docs/selfhost.md), the whole `onyx` command, compiles itself into
+the very same executable, and can replace the first one.
 Source files use the `.ox` extension.
 
 > **Status: v0.1, early.** The language core works and is tested. Programs
@@ -55,6 +56,19 @@ You need [Rust](https://rustup.rs) to build the compiler and
 
 ```bash
 cargo install --git https://github.com/GHugo7/onyx-lang
+```
+
+The `onyx` command also exists written in Onyx, and does exactly the same
+thing. Once the one written in Rust is installed, it can build that one
+from a copy of this repository; it can then take its place (`cargo
+uninstall onyx`), and Rust is not needed any more:
+
+```bash
+git clone https://github.com/GHugo7/onyx-lang
+```
+
+```bash
+onyx build --target native onyx-lang/compiler/main.ox -o ~/.local/bin/onyx
 ```
 
 ## Use
@@ -200,6 +214,7 @@ check "add works" {
 
 - [The Onyx Book](docs/book/README.md): a guided tour, chapter by chapter
 - [Standard library reference](docs/stdlib.md)
+- [Error codes](docs/errors.md), also shown by `onyx explain`
 - [The native target](docs/native.md), and how fast it is: [benchmarks](benchmarks/README.md)
 - [Examples](examples)
 - [Roadmap](docs/roadmap.md)
