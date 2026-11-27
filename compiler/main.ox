@@ -9,6 +9,7 @@ import "diag"
 import "errors"
 import "gen"
 import "js"
+import "jvm"
 import "lower"
 import "modules"
 import "optimize"
@@ -21,7 +22,8 @@ fn usage() -> string {
         "",
         "Usage:",
         "  onyx run <file.ox> [args...]     Compile and run a program",
-        "  onyx build <file.ox> [-o <out>]  Compile to build/<name>.js, or build/<name> with --target native",
+        "  onyx build <file.ox> [-o <out>]  Compile to build/<name>.js, build/<name> with --target native,",
+        "                                   or build/<name>.jar with --target jvm",
         "  onyx check <file.ox>             Check a program for errors without running it",
         "  onyx test [file.ox | folder]     Run the `check` blocks of a file and of its `name.test.ox`",
         "                                   file; without a file, every test of the folder",
@@ -31,6 +33,7 @@ fn usage() -> string {
         "Options (before the file name):",
         "  --target js                      Compile to JavaScript and run with Node.js (default)",
         "  --target native                  Compile to a Linux x86-64 executable (experimental)",
+        "  --target jvm                     Compile to a .jar and run it with Java (experimental)",
         "  --leak-check                     Native only: fail at exit if some memory was never released"
     ].join("\n")
 }
@@ -142,11 +145,30 @@ fn tested_file_of(path: string) -> string {
 
 // ---- compiling ----
 
-// What the compiler produced: JavaScript, or an executable.
+// What the compiler produced: JavaScript, an executable, or a jar.
 struct Output {
-    native: bool
+    target: string
     js: string
-    executable: [int]
+    binary: [int]
+}
+
+// The runtime a target adds to the program.
+fn runtime_of(target: string) -> string {
+    if target == "js" {
+        return ""
+    }
+    return target
+}
+
+// The extension of what `build` writes.
+fn extension_of(target: string) -> string {
+    if target == "js" {
+        return ".js"
+    }
+    if target == "jvm" {
+        return ".jar"
+    }
+    return ""
 }
 
 // Shows the problems and stops.
@@ -164,7 +186,7 @@ fn report_errors(report: diag.Report, sources: modules.Sources, file: string, co
 }
 
 // Compiles a source file, showing the problems and exiting when there are some.
-fn compile(path: string, test_mode: bool, native: bool, leak_check: bool) -> Output {
+fn compile(path: string, test_mode: bool, target: string, leak_check: bool) -> Output {
     // The tests of `name.ox` may live next to it, in `name.test.ox`.
     var companion = ""
     if test_mode {
@@ -188,39 +210,53 @@ fn compile(path: string, test_mode: bool, native: bool, leak_check: bool) -> Out
     }
     var sources = modules.new_sources()
     var report = diag.new_report()
-    var linked = modules.load_with(path, native, companion, sources, report) catch err {
+    var linked = modules.load_with(path, runtime_of(target), companion, sources, report) catch err {
         if err.message.starts_with("fatal") {
             die("cannot read `" + path + "`")
         }
         report_errors(report, sources, path, color)
-        return Output{native: native, js: "", executable: []}
+        return Output{target: target, js: "", binary: []}
     }
     var program = linked.program
     var an = checker.check(program, sources.bytes, !test_mode, linked.runtime_start, linked.runtime_end, report) catch err {
         report_errors(report, sources, path, color)
-        return Output{native: native, js: "", executable: []}
+        return Output{target: target, js: "", binary: []}
     }
     desugar.desugar(program, an)
     optimize.optimize(program)
-    if !native {
-        return Output{native: false, js: js.generate(program, an, sources, test_mode), executable: []}
+    if target == "js" {
+        return Output{target: target, js: js.generate(program, an, sources, test_mode), binary: []}
+    }
+    if target == "jvm" {
+        widen.widen(program, an)
+        capture.capture(program, an)
+        lower.lower_for(program, an, true)
+        var archive = jvm.generate(program, an, test_mode, sources, report) catch err {
+            report_errors(report, sources, path, color)
+            return Output{target: target, js: "", binary: []}
+        }
+        return Output{target: target, js: "", binary: archive}
     }
     widen.widen(program, an)
     capture.capture(program, an)
     lower.lower(program, an)
     var executable = gen.generate(program, an, leak_check, test_mode, sources, report) catch err {
         report_errors(report, sources, path, color)
-        return Output{native: native, js: "", executable: []}
+        return Output{target: target, js: "", binary: []}
     }
-    return Output{native: true, js: "", executable: executable}
+    return Output{target: target, js: "", binary: executable}
 }
 
 fn write_output(path: string, output: Output) {
-    if output.native {
-        write_bytes(path, output.executable) catch err {
+    if output.target == "native" {
+        write_bytes(path, output.binary) catch err {
             die("cannot write `" + path + "`: " + io_error(err.message))
         }
         set_executable(path) catch err {
+            die("cannot write `" + path + "`: " + io_error(err.message))
+        }
+    } else if output.target == "jvm" {
+        write_bytes(path, output.binary) catch err {
             die("cannot write `" + path + "`: " + io_error(err.message))
         }
     } else {
@@ -233,7 +269,8 @@ fn write_output(path: string, output: Output) {
 // ---- options ----
 
 struct Options {
-    native: bool
+    // "js", "native" or "jvm".
+    target: string
     leak_check: bool
     // What follows the options.
     rest: [string]
@@ -241,22 +278,18 @@ struct Options {
 
 // Removes the leading options (`--target <name>`, `--leak-check`) from the arguments.
 fn take_options(arguments: [string]) -> Options {
-    var options = Options{native: false, leak_check: false, rest: []}
+    var options = Options{target: "js", leak_check: false, rest: []}
     var i = 0
     while i < arguments.len() {
         if arguments[i] == "--target" {
             if i + 1 >= arguments.len() {
-                die("`--target` needs a value (available: js, native)")
+                die("`--target` needs a value (available: js, native, jvm)")
             }
             var target = arguments[i + 1]
-            if target == "js" {
-                options.native = false
-            } else if target == "native" {
-                options.native = true
-            } else if target == "jvm" {
-                die("the JVM target is not implemented yet")
+            if target == "js" || target == "native" || target == "jvm" {
+                options.target = target
             } else {
-                die("unknown target `" + target + "` (available: js, native)")
+                die("unknown target `" + target + "` (available: js, native, jvm)")
             }
             i += 2
         } else if arguments[i] == "--leak-check" {
@@ -295,16 +328,23 @@ fn exit_code(status: int) -> int {
 
 // Compiles and runs a file; returns the exit code of the program.
 fn execute(file: string, test_mode: bool, options: Options, arguments: [string]) -> int {
-    var output = compile(file, test_mode, options.native, options.leak_check)
-    var extension = ".js"
-    if output.native {
-        extension = ""
-    }
+    var output = compile(file, test_mode, options.target, options.leak_check)
     var dir = env("TMPDIR") or "/tmp"
-    var tmp = join_path(dir, "onyx-" + str(now()) + "-" + str(random_int(0, 999999)) + "-" + file_stem(file) + extension)
+    var tmp = join_path(dir, "onyx-" + str(now()) + "-" + str(random_int(0, 999999)) + "-" + file_stem(file) + extension_of(output.target))
     write_output(tmp, output)
     var status = 0
-    if output.native {
+    if output.target == "jvm" {
+        var java_args = ["-jar", tmp]
+        for a in arguments {
+            java_args.push(a)
+        }
+        status = run_program("java", java_args) catch err {
+            remove_file(tmp) catch e {
+            }
+            die("Onyx needs Java to run programs on the JVM target, but `java` was not found.\nInstall a Java runtime (version 11 or later) or use `onyx build` to only produce the .jar file.")
+            return 2
+        }
+    } else if output.target == "native" {
         status = run_program(tmp, arguments) catch err {
             remove_file(tmp) catch e {
             }
@@ -351,13 +391,9 @@ fn build(arguments: [string]) {
             die("unknown option `" + rest[i] + "`")
         }
     }
-    var output = compile(file, false, options.native, options.leak_check)
+    var output = compile(file, false, options.target, options.leak_check)
     if out == "" {
-        var extension = ".js"
-        if output.native {
-            extension = ""
-        }
-        out = "build/" + file_stem(file) + extension
+        out = "build/" + file_stem(file) + extension_of(output.target)
     }
     var parts = out.split("/")
     if parts.len() > 1 {
@@ -427,10 +463,7 @@ fn test(arguments: [string]) {
         print("no tests found in `" + given + "` (tests are `check` blocks, in `name.ox` or in `name.test.ox`)")
         return
     }
-    var target = "js"
-    if options.native {
-        target = "native"
-    }
+    var target = options.target
     var failed = 0
     for file in files {
         var shown = file
@@ -486,7 +519,7 @@ fn main() -> void! {
     } else if command == "check" {
         var options = take_options(rest)
         var file = source_arg(options.rest)
-        compile(file, false, options.native, false)
+        compile(file, false, options.target, false)
         print("ok: " + file + " has no errors")
     } else if command == "tokens" {
         // What each stage makes of a file, to compare with the compiler

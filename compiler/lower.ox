@@ -25,7 +25,17 @@ import "desugar"
 // so that they never share a key with a variable of the program.
 const TEMP_POSITIONS = 3377699720527872
 
+// For the JVM target, `or` also goes to the root of a statement: when the
+// JVM catches an exception, it empties the operand stack, and what was
+// computed before the `or` would be lost.
+var or_leaves = false
+
 fn lower(program: ast.Program, an: checker.Analysis) {
+    lower_for(program, an, false)
+}
+
+fn lower_for(program: ast.Program, an: checker.Analysis, jvm: bool) {
+    or_leaves = jvm
     var globals: map<string, bool> = {}
     for item in program.items {
         match item {
@@ -146,7 +156,7 @@ fn contains_try(e: ast.Expr) -> bool {
             return false
         }
         Or(inner, default) {
-            return contains_try(inner) || contains_try(default)
+            return or_leaves || contains_try(inner) || contains_try(default)
         }
         // The block of a `catch` is made of statements, lowered on their own.
         Catch(inner, _, _, _, _) {

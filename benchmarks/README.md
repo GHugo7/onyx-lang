@@ -1,7 +1,7 @@
 # Benchmarks
 
-Small programs that each stress one thing. They only use what the native
-target supports, so the same source runs on both targets.
+Small programs that each stress one thing. The same source runs on every
+target.
 
 ```bash
 cargo build --release
@@ -11,8 +11,10 @@ cargo build --release
 python3 benchmarks/run.py
 ```
 
-The script builds every program for both targets and prints the best of three
-runs, startup included.
+The script builds every program for each target and prints the best of three
+runs, startup included. The JVM target needs the compiler written in Onyx
+(`python3 benchmarks/run.py path/to/oxc`); its numbers are in
+[the JVM target](../docs/jvm.md#performance).
 
 ## Results
 

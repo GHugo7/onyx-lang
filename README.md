@@ -39,15 +39,16 @@ fn main() {
 }
 ```
 
-The compiler is written in Rust with no dependencies, and also in Onyx:
-[that one](docs/selfhost.md), the whole `onyx` command, compiles itself into
-the very same executable, and can replace the first one.
-Source files use the `.ox` extension.
+The compiler is written in Onyx: [the whole `onyx` command](docs/selfhost.md)
+compiles itself into the very same executable. It was first written in Rust,
+with no dependencies; that version is now frozen, and only builds the first
+Onyx compiler. Source files use the `.ox` extension.
 
 > **Status: v0.1, early.** The language core works and is tested. Programs
-> compile to JavaScript, and an experimental [native target](docs/native.md)
-> writes Linux executables directly, with no other tool involved. See the
-> [roadmap](docs/roadmap.md).
+> compile to JavaScript, and two experimental targets write files that need
+> nothing else: Linux executables with the [native target](docs/native.md),
+> and `.jar` files for Java with the [JVM target](docs/jvm.md), the way to
+> Minecraft plugins. See the [roadmap](docs/roadmap.md).
 
 ## Install
 
@@ -58,9 +59,9 @@ You need [Rust](https://rustup.rs) to build the compiler and
 cargo install --git https://github.com/GHugo7/onyx-lang
 ```
 
-The `onyx` command also exists written in Onyx, and does exactly the same
-thing. Once the one written in Rust is installed, it can build that one
-from a copy of this repository; it can then take its place (`cargo
+That installs the `onyx` command written in Rust, which can then build the
+one written in Onyx from a copy of this repository. The Onyx one does all
+the Rust one does, and more (the JVM target): it takes its place (`cargo
 uninstall onyx`), and Rust is not needed any more:
 
 ```bash
@@ -80,6 +81,7 @@ onyx test hello.ox         # run the file's `check` blocks, and those of hello.t
 onyx test                  # run every test of the folder
 onyx build hello.ox        # write build/hello.js
 onyx build --target native hello.ox   # write build/hello, a Linux executable
+onyx build --target jvm hello.ox      # write build/hello.jar, for `java -jar`
 onyx explain E0200         # explain an error code
 ```
 

@@ -280,21 +280,27 @@ fn onyx_command_in_onyx_behaves_the_same() {
         "explain e0118",
         "explain E9999",
         "version",
-        "help",
-        "",
         "frobnicate",
         "check missing.ox",
-        "run --target jvm x.ox",
         "build examples/hello.ox --frob",
     ] {
         commands.push(line.split_whitespace().map(String::from).collect());
+    }
+    // The compiler in Rust is frozen: its usage text does not have the
+    // targets added since (`--target jvm`), and is left out of the comparison.
+    fn without_usage(text: &[u8]) -> String {
+        let text = String::from_utf8_lossy(text).to_string();
+        match text.find("Onyx - a small, statically typed programming language") {
+            Some(at) => text[..at].to_string(),
+            None => text,
+        }
     }
     for args in &commands {
         let rust = Command::new(ONYX).args(args).output().unwrap();
         let onyx = Command::new(&exe).args(args).output().unwrap();
         let shown = args.join(" ");
-        assert_eq!(String::from_utf8_lossy(&onyx.stdout), String::from_utf8_lossy(&rust.stdout), "output of `onyx {shown}`");
-        assert_eq!(String::from_utf8_lossy(&onyx.stderr), String::from_utf8_lossy(&rust.stderr), "errors of `onyx {shown}`");
+        assert_eq!(without_usage(&onyx.stdout), without_usage(&rust.stdout), "output of `onyx {shown}`");
+        assert_eq!(without_usage(&onyx.stderr), without_usage(&rust.stderr), "errors of `onyx {shown}`");
         assert_eq!(onyx.status.code(), rust.status.code(), "exit code of `onyx {shown}`");
     }
 
@@ -311,6 +317,71 @@ fn onyx_command_in_onyx_behaves_the_same() {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The JVM target only exists in the compiler written in Onyx. The test
+/// programs, compiled with it and run by `java`, must print their `.out`
+/// file; and the compiler itself, compiled to a .jar and run on the JVM,
+/// must write the same .jar as the native one. Skipped without `java`.
+mod jvm {
+    use super::*;
+
+    fn java() -> Option<Command> {
+        let mut java = Command::new("java");
+        // Some machines set options that make `java` talk on stderr.
+        java.env_remove("JAVA_TOOL_OPTIONS");
+        match Command::new("java").arg("-version").output() {
+            Ok(out) if out.status.success() => Some(java),
+            _ => {
+                eprintln!("`java` not found: the JVM target is not tested");
+                None
+            }
+        }
+    }
+
+    fn compiler(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let exe = dir.join("oxc");
+        let built = Command::new(ONYX).args(["build", "--target", "native", "compiler/main.ox", "-o"]).arg(&exe).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        exe
+    }
+
+    #[test]
+    fn test_programs_print_their_output() {
+        if java().is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("onyx-jvm-programs-{}", std::process::id()));
+        let oxc = compiler(&dir);
+        let mut files = programs("tests/run");
+        files.extend(programs("tests/native"));
+        for file in files {
+            let jar = dir.join("program.jar");
+            let built = Command::new(&oxc).args(["build", "--target", "jvm"]).arg(&file).arg("-o").arg(&jar).output().unwrap();
+            assert!(built.status.success(), "{}: {}", file.display(), String::from_utf8_lossy(&built.stderr));
+            let out = java().unwrap().arg("-jar").arg(&jar).output().unwrap();
+            let expected = std::fs::read_to_string(file.with_extension("out")).unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{}", file.display());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_compiler_runs_on_the_jvm() {
+        if java().is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("onyx-jvm-compiler-{}", std::process::id()));
+        let oxc = compiler(&dir);
+        let (first, second) = (dir.join("first.jar"), dir.join("second.jar"));
+        let built = Command::new(&oxc).args(["build", "--target", "jvm", "compiler/main.ox", "-o"]).arg(&first).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let again = java().unwrap().arg("-jar").arg(&first).args(["build", "--target", "jvm", "compiler/main.ox", "-o"]).arg(&second).output().unwrap();
+        assert!(again.status.success(), "{}", String::from_utf8_lossy(&again.stderr));
+        assert!(std::fs::read(&first).unwrap() == std::fs::read(&second).unwrap(), "the compiler on the JVM writes another .jar");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 mod native {

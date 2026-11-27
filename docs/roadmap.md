@@ -45,10 +45,26 @@ for what works today.
     `test`, `explain`, both targets, errors shown with their source. It
     behaves exactly like the one written in Rust, and replaces it.
 
+From here on, the compiler written in Onyx is the reference: the one
+written in Rust is frozen, and only builds the first Onyx compiler.
+
+## In progress: the JVM target, towards Minecraft
+
+See [the JVM target](jvm.md).
+
+1. **The JVM target** (done): `--target jvm` writes a `.jar`, class files
+   and archive included, with the runtime written in Onyx. The whole
+   language works, tasks included, except `fetch`; the compiler itself runs
+   on the JVM and compiles itself into the same `.jar`.
+2. **The door to Java**: declaring Java classes and calling them, typed.
+3. **Minecraft plugins**: a `.jar` per program that Paper loads, and a
+   typed `minecraft` module (events, commands, players, worlds) that keeps
+   track of what a plugin registered.
+4. **OnyxLoader**: a Paper plugin that compiles the `.ox` files of a folder
+   on the server, reloads them all or none, and keeps what it compiled.
+
 ## Later
 
-- **JVM backend** for Minecraft plugins (memory handled by the JVM), with an
-  `OnyxLoader` plugin for Paper servers that loads `.ox` scripts directly.
 - **Web**: run `.ox` files in the browser, DOM bindings, an online playground.
 - **A game library** (`onyx.game`).
 - More systems for the native target: ARM64, Windows, macOS.

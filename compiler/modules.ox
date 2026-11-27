@@ -148,7 +148,7 @@ fn module_base(stem: string) -> string {
 
 // The built-in functions, which a module may not define again.
 fn is_builtin(name: string) -> bool {
-    var names = ["print", "eprint", "str", "int", "float", "abs", "min", "max", "weak", "embed", "parse_int", "parse_float",
+    var names = ["print", "eprint", "__jvm", "str", "int", "float", "abs", "min", "max", "weak", "embed", "parse_int", "parse_float",
         "read_file", "write_file", "append_file", "file_exists", "set_executable", "remove_file", "remove_dir", "make_dir", "list_dir", "is_dir", "run_program",
         "stdout_is_terminal", "stderr_is_terminal", "args", "env", "exit", "sleep", "now", "random",
         "random_int", "input", "fetch", "expect", "panic", "sqrt", "bit_and", "bit_or", "bit_xor", "shift_left",
@@ -810,23 +810,30 @@ struct Linked {
 // when it is compiled to machine code.
 const RUNTIME = embed("../src/native/runtime.ox")
 
+// The runtime of the JVM target, also written in Onyx.
+const JVM_RUNTIME = embed("jvm/runtime.ox")
+
 fn load(entry: string, with_runtime: bool, report: diag.Report) -> Linked! {
-    return load_with(entry, with_runtime, "", new_sources(), report)?
+    var runtime = ""
+    if with_runtime {
+        runtime = "native"
+    }
+    return load_with(entry, runtime, "", new_sources(), report)?
 }
 
 fn new_sources() -> Sources {
     return Sources{bytes: [], files: []}
 }
 
-// Loads `entry` and everything it imports, followed by the runtime when
-// `with_runtime`. `companion`, when not "", is the test file of the entry
+// Loads `entry` and everything it imports, followed by the runtime of a
+// target (`runtime`: "native" or "jvm"; "" for none). `companion`, when not "", is the test file of the entry
 // (`name.test.ox`): part of it, private names included. Fails with "fatal"
 // when the entry file cannot be read, with "fatal: <file>" when the
 // companion cannot, with something else after noting the problems in
 // `report`.
 // The files go into `sources`, which tells where a problem is even when
 // the program cannot be loaded.
-fn load_with(entry: string, with_runtime: bool, companion: string, sources: Sources, report: diag.Report) -> Linked! {
+fn load_with(entry: string, runtime: string, companion: string, sources: Sources, report: diag.Report) -> Linked! {
     var data = read_bytes(entry) catch err {
         fail "fatal"
     }
@@ -882,9 +889,12 @@ fn load_with(entry: string, with_runtime: bool, companion: string, sources: Sour
     }
     var runtime_start = -1
     var runtime_end = -1
-    if with_runtime {
+    if runtime != "" {
         // Parsed after everything else, with no imports to resolve.
         var text = bytes(RUNTIME)
+        if runtime == "jvm" {
+            text = bytes(JVM_RUNTIME)
+        }
         runtime_start = loader.sources.add("<onyx runtime>", text)
         runtime_end = runtime_start + text.len()
         var prelude = parser.parse(loader.sources.bytes, runtime_start, runtime_end, loader.next_id, report)?

@@ -3,7 +3,8 @@
 The Onyx compiler was first written in Rust (`src/`). It now also exists
 written in Onyx itself (`compiler/`): the whole `onyx` command, both
 targets included, and it compiles its own source. Onyx needs nothing but
-Onyx.
+Onyx. The Rust compiler is now frozen: new features, such as the
+[JVM target](jvm.md), are only in the Onyx one, which builds itself.
 
 It was built stage by stage. Each stage was checked against the Rust
 compiler on every Onyx file of the repository, so that a difference showed
@@ -58,7 +59,9 @@ And it compiles itself:
 ```
 
 `oxc2` is `oxc`, byte for byte, and so is what `oxc2` makes of the same
-source: a fixed point. The 18600 lines of the compiler, plus the 4000 of
+source: a fixed point. The same holds on the JVM: compiled with `--target
+jvm`, the compiler runs with `java -jar` and writes the same `.jar`, and the
+same native executable, as the native one. The 18600 lines of the compiler, plus the 4000 of
 the native runtime, compile in a quarter of a second, into a 920 KB
 executable. It carries the runtimes of both targets (`src/native/runtime.ox`
 and `src/runtime.js`) and the explanations of the error codes

@@ -37,6 +37,9 @@ enum Type {
     Range
     // Produced after an error was reported; silences follow-up errors.
     Unknown
+    // Any Java object: `__object`, only in the runtime of the JVM target.
+    // Every value converts to it, and it converts to every type.
+    Object
 }
 
 // A type as messages show it.
@@ -89,6 +92,9 @@ fn show(t: Type) -> string {
         }
         Unknown {
             return "?"
+        }
+        Object {
+            return "__object"
         }
     }
 }
@@ -202,6 +208,11 @@ struct Analysis {
     captures: map<int, [Captured]>
     // Filled in for the native target: the program starts tasks with `fork`.
     has_forks: bool
+    // The type written for a `var` or a `const` (`var s: Shape = ...`), by
+    // the position of its name: what it may hold later, which its first
+    // value alone does not say.
+    declared: map<int, Type>
+    interfaces: map<string, InterfaceInfo>
 }
 
 // A variable that a lambda uses, and its type.
@@ -384,8 +395,100 @@ fn builtin_sig(name: string) -> BuiltinSig! {
     }
 }
 
+// ---- `__jvm`: Java, for the runtime of the JVM target ----
+//
+// `__jvm("static java/lang/Long.toString(J)Ljava/lang/String;", n)` calls a
+// Java method; the first argument says what to do, the others are passed
+// on. "static", "virtual" and "interface" call methods (the first value is
+// the object for the last two), "new java/lang/StringBuilder()" makes an
+// object, "get owner.name:descriptor" reads a static field, "is class"
+// tells whether a value is of a class, "null" is no object and "same"
+// tells whether its two values are the same object. A `!`
+// after the kind ("static! ...") makes the call fallible: an exception it
+// throws becomes an Onyx error.
+
+// The operation of a `__jvm` call: its first argument, a plain string.
+fn jvm_operation(args: [ast.Expr]) -> string {
+    if args.len() == 0 {
+        return ""
+    }
+    match args[0].kind {
+        Str(parts) {
+            if parts.len() == 1 {
+                match parts[0] {
+                    Lit(s) {
+                        return s
+                    }
+                    else {
+                    }
+                }
+            }
+        }
+        else {
+        }
+    }
+    return ""
+}
+
+// The Onyx type of a value of this JVM descriptor.
+fn jvm_type(descriptor: string) -> Type {
+    if descriptor == "V" {
+        return Type.Void
+    }
+    if descriptor == "Z" {
+        return Type.Bool
+    }
+    if descriptor == "J" || descriptor == "I" || descriptor == "S" || descriptor == "B" || descriptor == "C" {
+        return Type.Int
+    }
+    if descriptor == "D" || descriptor == "F" {
+        return Type.Float
+    }
+    if descriptor == "Ljava/lang/String;" {
+        return Type.Str
+    }
+    return Type.Object
+}
+
+// What a `__jvm` operation gives (Unknown: it is not one).
+fn jvm_result(operation: string) -> Type {
+    if operation == "null" {
+        return Type.Object
+    }
+    if operation == "same" {
+        return Type.Bool
+    }
+    var space = operation.index_of(" ")
+    if space < 0 {
+        return Type.Unknown
+    }
+    var kind = operation.slice(0, space).replace("!", "")
+    var rest = operation.slice(space + 1, operation.len())
+    if kind == "static" || kind == "virtual" || kind == "interface" {
+        var close = rest.index_of(")")
+        if close < 0 {
+            return Type.Unknown
+        }
+        return jvm_type(rest.slice(close + 1, rest.len()))
+    }
+    if kind == "new" {
+        return Type.Object
+    }
+    if kind == "get" {
+        var colon = rest.index_of(":")
+        if colon < 0 {
+            return Type.Unknown
+        }
+        return jvm_type(rest.slice(colon + 1, rest.len()))
+    }
+    if kind == "is" {
+        return Type.Bool
+    }
+    return Type.Unknown
+}
+
 fn is_builtin(name: string) -> bool {
-    if ["print", "eprint", "str", "int", "float", "abs", "min", "max", "weak", "embed"].contains(name) {
+    if ["print", "eprint", "str", "int", "float", "abs", "min", "max", "weak", "embed", "__jvm"].contains(name) {
         return true
     }
     builtin_sig(name) catch err {
@@ -1110,6 +1213,11 @@ struct Checker {
                     "error" {
                         return Type.Error
                     }
+                    "__object" {
+                        if self.in_runtime(t.start, t.end) {
+                            return Type.Object
+                        }
+                    }
                     else {
                     }
                 }
@@ -1219,6 +1327,9 @@ struct Checker {
         if from == to || is_unknown(from) || is_unknown(to) {
             return true
         }
+        if from == Type.Object || to == Type.Object {
+            return from != Type.Void && to != Type.Void
+        }
         match from {
             Int {
                 return to == Type.Float
@@ -1246,7 +1357,7 @@ struct Checker {
             List(a) {
                 match to {
                     List(b) {
-                        return is_unknown(a) || is_unknown(b)
+                        return is_unknown(a) || is_unknown(b) || a == Type.Object || b == Type.Object
                     }
                     else {
                         return false
@@ -1629,6 +1740,7 @@ struct Checker {
                 if ty.len() > 0 {
                     self.require(found, annotated, init)
                     var_ty = annotated
+                    self.an.declared[name_start] = annotated
                 }
                 if var_ty == Type.Void {
                     var d = self.err("E0102", "this expression does not produce a value", init.start, init.end)
@@ -2593,6 +2705,14 @@ struct Checker {
             arg_types.push(self.expr(a, Type.Unknown))
         }
         match name {
+            "__jvm" {
+                var operation = jvm_operation(args)
+                var result = jvm_result(operation)
+                if result == Type.Unknown {
+                    self.err("E0102", "`__jvm` needs a plain string saying what to call first", e.start, e.end)
+                }
+                return outcome(result, operation.contains("! "))
+            }
             "print", "eprint" {
                 for i in 0..args.len() {
                     if arg_types[i] == Type.Void {
@@ -2979,7 +3099,9 @@ fn check(program: ast.Program, src: [int], require_main: bool, runtime_start: in
             enums: {},
             variants: {},
             captures: {},
-            has_forks: false
+            has_forks: false,
+            declared: {},
+            interfaces: {}
         }
     }
     c.push_scope()
@@ -2992,6 +3114,7 @@ fn check(program: ast.Program, src: [int], require_main: bool, runtime_start: in
     }
     c.an.structs = c.structs
     c.an.fns = c.fns
+    c.an.interfaces = c.interfaces
     return c.an
 }
 
