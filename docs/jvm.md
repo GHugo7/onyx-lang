@@ -24,17 +24,17 @@ compiler. Running a `.jar` needs Java 11 or newer.
 
 ## Status: experimental, but complete
 
-The whole language works, `fork` and channels included; only `fetch` is
-left out (rejected with error `E0500`, as on the native target). What was
-checked:
+The whole language works: `fork`, channels and `fetch` (HTTP and HTTPS)
+included. What was checked:
 
 - every program of `tests/run` and `tests/native` prints its expected output,
   and `onyx test --target jvm` reports the checks exactly as the other
   targets do;
-- 800 programs written by the fuzzer print the same lines, the same errors
+- 1600 programs written by the fuzzer print the same lines, the same errors
   and end with the same exit code as on the JavaScript target;
 - 1000 generated programs with tasks and channels take turns in exactly the
-  order of the native target (same output, same deadlocks, same panics);
+  order of the native target (same output, same deadlocks, same panics),
+  whichever of the three ways of passing the turn is used (see "Tasks");
 - the compiler itself, compiled to a `.jar` (700 KB), runs on the JVM: it
   compiles its own source into the very same `.jar`, and into the very same
   native executable, byte for byte, as the native compiler does.
@@ -47,7 +47,7 @@ installed.
 | Onyx | JVM |
 | --- | --- |
 | `int`, `float`, `bool` | `long`, `double`, `boolean` |
-| `string` | `java.lang.String` |
+| `string` | `java.lang.String`, its positions counted in characters |
 | `[T]` | `java.util.ArrayList`, numbers boxed (`Long`, `Double`, `Boolean`) |
 | `map<K, V>` | an object of the runtime that keeps the order of the keys |
 | a top-level function | a static method of `onyx.Main` |
@@ -66,6 +66,39 @@ object, as on the JavaScript target.
 `main` runs on a thread with a stack of 512 MB, so deep recursion works as on
 the native target. A recursion without end is reported as
 `panic: stack overflow (infinite recursion?)`.
+
+## Strings
+
+A Java string is made of UTF-16 units, and a character above U+FFFF (most
+emoji) takes two of them. Positions and lengths (`len`, `s[i]`, `slice`,
+`index_of`) still count characters, as on the native target, and strings
+compare by their characters. Most strings hold no such character, which
+Java tells at once for a string whose characters are all among the first
+256; the runtime also remembers the last string it looked at, so a loop
+that goes through a string with `s[i]` finds each character from the one
+before, in a time that does not grow with the position.
+
+A Java string cannot grow either: each `s += piece` copies the whole of `s`.
+So a local string variable that a loop only adds to is built in a
+`java.lang.StringBuilder` while the loop runs, and gets its value back when
+the loop ends:
+
+```onyx
+fn main() {
+    var out = ""
+    for i in 0..20000 {
+        if out != "" {
+            out += ", "
+        }
+        out += "item {i}"
+    }
+    print(out.len())
+}
+```
+
+The loop may still ask for the length of the string and whether it is empty.
+When it uses the string in any other way (`out.ends_with(",")`), every `+=`
+in it copies again.
 
 ## The runtime, written in Onyx
 
@@ -103,10 +136,32 @@ statement (`lower.ox`), where nothing is pending on the stack.
 
 ## Tasks
 
-Each task runs on a Java thread of its own (a virtual thread from Java 21
-on), but only the one whose turn it is runs: the others are parked. The
-scheduler is the one of the native target, written again in Onyx in the
-runtime, so that tasks take turns in the same order on every target.
+The scheduler is the one of the native target, written again in Onyx in the
+runtime, so that tasks take turns in the same order on every target. How a
+task is put aside and taken up again depends on the JVM:
+
+1. With Java 21 and later, every task is a continuation of the JVM: a stack
+   of its own that the JVM puts aside and gives back, all of them on the one
+   thread of the program. Passing the turn takes a fifth of a microsecond.
+   Continuations belong to the JVM's insides (`jdk.internal.vm`): the
+   manifest of a `.jar` that uses `fork` asks for them, which `java -jar`
+   grants.
+2. Otherwise with Java 21 and later (`java -cp program.jar onyx.Main`), a
+   virtual thread per task, all of them on one carrier thread: about twice
+   as slow.
+3. With older versions of Java, a thread of the system per task, of which
+   only the one whose turn it is runs: passing the turn wakes a thread up, a
+   matter of microseconds.
+
+Before the program starts, the JVM is made to prepare what the first task,
+the first continuation and the first `sleep` need, and every class of the
+program is loaded: that work would otherwise delay the first turns. Sleepers
+wake up in the order of their times in nanoseconds. So a program whose
+result depends on time (two `sleep`s a millisecond apart) behaves as on the
+native target; like there, it may still change on a busy machine.
+
+`fetch` lets the other tasks run while the answer comes, as on the
+JavaScript target.
 
 ## Performance
 
@@ -115,20 +170,20 @@ the JVM (about 50 ms) included:
 
 | Program | Native | Node | JVM |
 | --- | ---: | ---: | ---: |
-| `alloc` | 163 ms | 173 ms | 203 ms |
-| `closures` | 26 ms | 451 ms | 171 ms |
-| `collatz` | 384 ms | 1488 ms | 334 ms |
-| `fib` | 250 ms | 386 ms | 195 ms |
-| `loops` | 203 ms | 305 ms | 302 ms |
-| `maps` | 242 ms | 445 ms | 408 ms |
-| `nbody` | 19 ms | 57 ms | 72 ms |
-| `print` | 15 ms | 535 ms | 158 ms |
-| `shapes` | 25 ms | 437 ms | 66 ms |
-| `sieve` | 130 ms | 391 ms | 303 ms |
-| `sort` | 136 ms | 353 ms | 520 ms |
-| `strings` | 18 ms | 54 ms | 515 ms |
-| `structs` | 17 ms | 47 ms | 73 ms |
-| `tasks` | 13 ms | 85 ms | 1525 ms |
+| `alloc` | 166 ms | 161 ms | 245 ms |
+| `closures` | 27 ms | 360 ms | 182 ms |
+| `collatz` | 414 ms | 1632 ms | 369 ms |
+| `fib` | 292 ms | 456 ms | 229 ms |
+| `loops` | 266 ms | 346 ms | 315 ms |
+| `maps` | 177 ms | 381 ms | 407 ms |
+| `nbody` | 21 ms | 85 ms | 65 ms |
+| `print` | 21 ms | 919 ms | 160 ms |
+| `shapes` | 26 ms | 516 ms | 64 ms |
+| `sieve` | 99 ms | 272 ms | 265 ms |
+| `sort` | 196 ms | 638 ms | 459 ms |
+| `strings` | 19 ms | 54 ms | 120 ms |
+| `structs` | 17 ms | 59 ms | 76 ms |
+| `tasks` | 16 ms | 86 ms | 258 ms |
 
 Once the JVM has compiled the hot code, plain computation is as fast as
 native code, sometimes faster (`fib`, `collatz`). The Onyx compiler, run on
@@ -136,20 +191,12 @@ the JVM, compiles itself in about a second (a quarter of a second natively).
 
 ## Known gaps
 
-- Building a long string with `+=` in a loop takes time that grows with the
-  square of its length: Java strings cannot grow, every `+=` copies. (The
-  native target grows a string in place; JavaScript uses ropes.) Collect the
-  pieces in a list and `join` them instead.
-- Passing the turn from a task to another wakes a thread up: a few
-  microseconds, against a few nanoseconds natively. Programs that send
-  hundreds of thousands of messages are slow (`tasks` above).
-- Programs whose result depends on time (two `sleep`s a millisecond apart)
-  may take turns differently: the first run of a piece of code is slower on
-  the JVM, before it is compiled.
-- Positions in strings count UTF-16 units, as on the JavaScript target:
-  characters outside the Basic Multilingual Plane (most emoji) count as two.
 - `run_program` takes an exit code above 128 for a program stopped by a
-  signal (Java gives 128 + n), and returns -n as the other targets do.
+  signal, and returns -n as the other targets do. Java itself mixes the two
+  up: it gives 128 + n for a program stopped by the signal n.
+- When `fetch` fails before getting an answer (no network, a host that does
+  not exist), its error says so in the JVM's words, which are not those of
+  Node.js.
 
 ## How it is made
 

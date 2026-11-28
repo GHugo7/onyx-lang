@@ -323,6 +323,7 @@ fn onyx_command_in_onyx_behaves_the_same() {
 /// programs, compiled with it and run by `java`, must print their `.out`
 /// file; and the compiler itself, compiled to a .jar and run on the JVM,
 /// must write the same .jar as the native one. Skipped without `java`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod jvm {
     use super::*;
 
@@ -364,6 +365,136 @@ mod jvm {
             let expected = std::fs::read_to_string(file.with_extension("out")).unwrap();
             assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{}", file.display());
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Tasks take turns in the same order whichever way the JVM passes the
+    /// turn: continuations, virtual threads or threads of the system.
+    #[test]
+    fn tasks_take_turns_the_same_way_everywhere() {
+        if java().is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("onyx-jvm-tasks-{}", std::process::id()));
+        let oxc = compiler(&dir);
+        let files: Vec<PathBuf> = programs("tests/native")
+            .into_iter()
+            .filter(|f| {
+                let name = f.file_name().unwrap().to_string_lossy().to_string();
+                name.starts_with("turns_") || name == "tasks.ox"
+            })
+            .collect();
+        assert!(files.len() >= 7);
+        for file in files {
+            let jar = dir.join("program.jar");
+            let built = Command::new(&oxc).args(["build", "--target", "jvm"]).arg(&file).arg("-o").arg(&jar).output().unwrap();
+            assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+            let expected = std::fs::read_to_string(file.with_extension("out")).unwrap();
+            for mode in ["0", "1", "2"] {
+                let out = java().unwrap().env("ONYX_JVM_SWITCHING", mode).arg("-jar").arg(&jar).output().unwrap();
+                assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{} with ONYX_JVM_SWITCHING={mode}", file.display());
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Positions in strings count characters, as on the native target (on
+    /// JavaScript, a character above U+FFFF counts as two).
+    #[test]
+    fn strings_count_characters_as_natively() {
+        if java().is_none() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("onyx-jvm-chars-{}", std::process::id()));
+        let oxc = compiler(&dir);
+        let src = dir.join("chars.ox");
+        std::fs::write(
+            &src,
+            r#"fn main() {
+    var s = "a😀b€c"
+    print(s.len(), s[1], s[2], s.slice(1, 4), s.slice(-2, 5), s.index_of("b"), s.index_of("c"))
+    var parts: [string] = []
+    for i in 0..s.len() {
+        parts.push(s[i])
+    }
+    var high = chr(0xE000)
+    print(parts, s.chars(), "€" < "😀", high < "😀", [high, "😀", "b", "é"].sort())
+    var built = ""
+    for i in 0..1000 {
+        built += "😀é"
+    }
+    print(built.len(), built[1999], ord(built[0]))
+}
+"#,
+        )
+        .unwrap();
+        let (exe, jar) = (dir.join("chars"), dir.join("chars.jar"));
+        let built = Command::new(&oxc).args(["build", "--target", "native"]).arg(&src).arg("-o").arg(&exe).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let built = Command::new(&oxc).args(["build", "--target", "jvm"]).arg(&src).arg("-o").arg(&jar).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let native = Command::new(&exe).output().unwrap();
+        let jvm = java().unwrap().arg("-jar").arg(&jar).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&jvm.stdout), String::from_utf8_lossy(&native.stdout));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `fetch` asks a small HTTP server, started here, for a page and for a
+    /// page that is not there.
+    #[test]
+    fn fetch_reads_a_page() {
+        if java().is_none() {
+            return;
+        }
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                reader.read_line(&mut first).unwrap();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let body = "été 😀";
+                let reply = if first.contains("/hello") {
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                };
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("onyx-jvm-fetch-{}", std::process::id()));
+        let oxc = compiler(&dir);
+        let src = dir.join("page.ox");
+        std::fs::write(
+            &src,
+            format!(
+                r#"fn main() {{
+    print(fetch("http://127.0.0.1:{port}/hello") or "failed")
+    var missing = fetch("http://127.0.0.1:{port}/missing") catch err {{
+        err.message
+    }}
+    print(missing)
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let jar = dir.join("page.jar");
+        let built = Command::new(&oxc).args(["build", "--target", "jvm"]).arg(&src).arg("-o").arg(&jar).output().unwrap();
+        assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+        let out = java().unwrap().arg("-jar").arg(&jar).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("été 😀\ncannot fetch \"http://127.0.0.1:{port}/missing\": HTTP 404\n")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

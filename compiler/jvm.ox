@@ -314,7 +314,8 @@ fn generate(program: ast.Program, an: checker.Analysis, tests: bool, sources: mo
         loops: [],
         ret: checker.Type.Void,
         captured: {},
-        this_class: ""
+        this_class: "",
+        builders: {}
     }
     var main = g.class_named(MAIN, classfile.ACC_PUBLIC | classfile.ACC_SUPER, OBJECT)
     main.interfaces.push("java/lang/Runnable")
@@ -363,16 +364,17 @@ fn generate(program: ast.Program, an: checker.Analysis, tests: bool, sources: mo
     }
     for item in program.items {
         match item {
-            Global(stmt) {
+            Global(top) {
+                var stmt = global_let(top)
                 match stmt.kind {
                     Let(name, name_start, _, _, _, init) {
                         var ty = g.declared(name_start, init)
                         g.globals[name] = ty
                         if name.starts_with("__jrt_") {
-                            runtime_globals.push(stmt)
+                            runtime_globals.push(top)
                         } else {
                             main.field(classfile.ACC_PUBLIC | classfile.ACC_STATIC, global_name(name), g.desc(ty))
-                            user_globals.push(stmt)
+                            user_globals.push(top)
                         }
                     }
                     else {
@@ -405,8 +407,8 @@ fn generate(program: ast.Program, an: checker.Analysis, tests: bool, sources: mo
     main.method(classfile.ACC_PUBLIC | classfile.ACC_STATIC, "main", "([Ljava/lang/String;)V", code)
     g.constructor(main, OBJECT)
 
-    // `run()`: the runtime's variables, then the program's, then `main` (or
-    // the checks), then the tasks that are left; whatever goes wrong ends in
+    // `run()`: the runtime's variables, then `body$`, directly or, in a
+    // program with tasks, as the task of `main`; whatever goes wrong ends in
     // `__jrt_crash`.
     var params: [JParam] = []
     g.begin(MAIN, false, params)
@@ -417,6 +419,32 @@ fn generate(program: ast.Program, an: checker.Analysis, tests: bool, sources: mo
     var done = code.new_label()
     code.bind(start)
     code.invokestatic(MAIN, "init$runtime", "()V")
+    if an.has_forks {
+        // Every class of the program is loaded first: the time the JVM
+        // takes for that does not delay the tasks once they run.
+        code.invokestatic(MAIN, "load$", "()V")
+        g.ensure_body_class()
+        code.new_object("onyx/Body")
+        code.op(DUP, 1)
+        code.invokespecial("onyx/Body", "<init>", "()V")
+        g.runtime("__jrt_start")
+    } else {
+        code.invokestatic(MAIN, "body$", "()V")
+    }
+    code.bind(end)
+    code.goto(done)
+    code.handler(start, end, handler, "")
+    code.bind(handler)
+    g.runtime("__jrt_crash")
+    code.bind(done)
+    g.runtime("__jrt_finish")
+    code.return_value(5)
+    main.method(classfile.ACC_PUBLIC, "run", "()V", code)
+
+    // `body$()`: the program's variables, then `main` (or the checks), then
+    // the tasks that are left.
+    g.begin(MAIN, true, params)
+    code = g.code
     for stmt in user_globals {
         g.init_global(stmt)
     }
@@ -429,22 +457,29 @@ fn generate(program: ast.Program, an: checker.Analysis, tests: bool, sources: mo
     if an.has_forks {
         g.runtime("__jrt_run_tasks")
     }
-    code.bind(end)
-    code.goto(done)
-    code.handler(start, end, handler, "")
-    code.bind(handler)
-    g.runtime("__jrt_crash")
-    code.bind(done)
-    g.runtime("__jrt_finish")
     code.return_value(5)
-    main.method(classfile.ACC_PUBLIC, "run", "()V", code)
+    main.method(classfile.ACC_PUBLIC | classfile.ACC_STATIC, "body$", "()V", code)
 
     g.complete(runtime_globals)
 
     if report.diags.len() > 0 {
         fail "jvm"
     }
-    var archive = jar.new_jar(MAIN)
+    // Tasks take turns fastest as continuations, which the manifest asks
+    // the JVM to let the program use (see the runtime).
+    var headers: [string] = []
+    if an.has_forks {
+        headers.push("Add-Exports: java.base/jdk.internal.vm")
+        var load = classfile.new_code(main.pool, 0)
+        for name in g.class_order {
+            load.sconst(name.replace("/", "."))
+            load.invokestatic("java/lang/Class", "forName", "(Ljava/lang/String;)Ljava/lang/Class;")
+            load.op(POP, -1)
+        }
+        load.return_value(5)
+        main.method(classfile.ACC_PUBLIC | classfile.ACC_STATIC, "load$", "()V", load)
+    }
+    var archive = jar.new_jar(MAIN, headers)
     for name in g.class_order {
         archive.add(name + ".class", g.classes[name].bytes())
     }
@@ -512,6 +547,9 @@ struct Jvm {
     // In a lambda: what it captured, kept in fields of `this_class`.
     captured: map<string, checker.Type>
     this_class: string
+    // The string variables that the loops being written build in a
+    // StringBuilder, and the slot of each StringBuilder.
+    builders: map<string, int>
 
     fn unsupported(self, start: int, end: int, what: string) {
         var d = self.report.add("E0500", what + " are not supported by the JVM target yet", start, end)
@@ -1027,6 +1065,7 @@ struct Jvm {
         self.marks = [self.next_slot]
         self.loops = []
         self.captured = {}
+        self.builders = {}
         self.this_class = class_name
         self.ret = checker.Type.Void
     }
@@ -1072,7 +1111,7 @@ struct Jvm {
             }
             var more = self.finish_values()
             for stmt in runtime_globals {
-                match stmt.kind {
+                match global_let(stmt).kind {
                     Let(name, _, _, _, _, _) {
                         if self.used_globals.has(name) && !seen.has(name) {
                             // What its value needs: written aside, only to
@@ -1095,7 +1134,7 @@ struct Jvm {
         self.begin(MAIN, true, params)
         var main = self.classes[MAIN]
         for stmt in runtime_globals {
-            match stmt.kind {
+            match global_let(stmt).kind {
                 Let(name, _, _, _, _, _) {
                     if seen.has(name) {
                         main.field(classfile.ACC_PUBLIC | classfile.ACC_STATIC, global_name(name), self.desc(self.globals[name]))
@@ -1222,6 +1261,12 @@ struct Jvm {
     // as a value of type `want`.
     fn load_name(self, name: string, want: checker.Type) {
         var code = self.code
+        if self.builders.has(name) {
+            code.load(4, self.builders[name])
+            code.invokevirtual(BUILDER, "toString", "()Ljava/lang/String;")
+            self.convert(checker.Type.Str, want)
+            return
+        }
         for local in self.lookup(name) {
             code.load(kind_of(self.desc(local.ty)), local.slot)
             self.convert(local.ty, want)
@@ -1272,6 +1317,15 @@ struct Jvm {
 
     fn init_global(self, stmt: ast.Stmt) {
         match stmt.kind {
+            Block(b) {
+                // What the value needs first (see lower.ox), then the variable.
+                self.push_scope()
+                for i in 0..b.stmts.len() - 1 {
+                    self.stmt(b.stmts[i])
+                }
+                self.init_global(b.stmts[b.stmts.len() - 1])
+                self.pop_scope()
+            }
             Let(name, _, _, _, _, init) {
                 if is_catch(init) {
                     var target = ast.Expr{id: -1, start: stmt.start, end: stmt.end, kind: ast.ExprKind.Ident(name)}
@@ -1401,6 +1455,7 @@ struct Jvm {
                 }
             }
             While(cond, body) {
+                var built = self.start_builders(s)
                 var top = code.new_label()
                 var end = code.new_label()
                 code.bind(top)
@@ -1412,9 +1467,12 @@ struct Jvm {
                     code.goto(top)
                 }
                 code.bind(end)
+                self.end_builders(built)
             }
             For(name, _, _, iter, body) {
+                var built = self.start_builders(s)
                 self.for_stmt(name, iter, body)
+                self.end_builders(built)
             }
             Return(value) {
                 if value.len() == 0 {
@@ -1659,6 +1717,28 @@ struct Jvm {
         }
         match target.kind {
             Ident(name) {
+                if self.builders.has(name) {
+                    // Added to the StringBuilder of the loop.
+                    code.load(4, self.builders[name])
+                    if op == ast.AssignOp.Add {
+                        self.append_string(value)
+                    } else {
+                        var pieces: [ast.Expr] = []
+                        self.concat_parts(value, pieces)
+                        if pieces.len() > 1 && is_ident(pieces[0], name) {
+                            for i in 1..pieces.len() {
+                                self.append_string(pieces[i])
+                            }
+                        } else {
+                            code.iconst(0)
+                            code.invokevirtual(BUILDER, "setLength", "(I)V")
+                            code.load(4, self.builders[name])
+                            self.append_string(value)
+                        }
+                    }
+                    code.op(POP, -1)
+                    return
+                }
                 if op == ast.AssignOp.Set {
                     self.expr(value)
                     self.store_name(name, self.ty(value))
@@ -2218,6 +2298,323 @@ struct Jvm {
         out.push(e)
     }
 
+    // ---- strings built by loops ----
+    //
+    // A Java string cannot grow: each `s += piece` copies the whole of `s`,
+    // and building a long string in a loop would take a time that grows
+    // with the square of its length. So a local string variable that a loop
+    // only adds to (using nothing of it but its length and whether it is
+    // empty) is built in a StringBuilder while the loop runs, and gets its
+    // value back when the loop ends.
+
+    // The slot of the StringBuilder of `e`, when it names a string that a
+    // loop builds, or -1.
+    fn built(self, e: ast.Expr) -> int {
+        match e.kind {
+            Ident(name) {
+                if self.builders.has(name) {
+                    return self.builders[name]
+                }
+            }
+            else {
+            }
+        }
+        return -1
+    }
+
+    // Before the loop `s`: a StringBuilder for each string variable it only
+    // adds to. Their names.
+    fn start_builders(self, s: ast.Stmt) -> [string] {
+        var names: [string] = []
+        self.added_to(s, names)
+        var out: [string] = []
+        for name in names {
+            if self.builders.has(name) || out.contains(name) {
+                continue
+            }
+            var found = self.lookup(name)
+            if found.len() == 0 || found[0].ty != checker.Type.Str || self.appends(s, name) <= 0 {
+                continue
+            }
+            var code = self.code
+            var slot = self.slot_of_desc(OBJECT_DESC)
+            code.new_object(BUILDER)
+            code.op(DUP, 1)
+            code.load(4, found[0].slot)
+            code.invokespecial(BUILDER, "<init>", "(Ljava/lang/String;)V")
+            code.store(4, slot)
+            self.builders[name] = slot
+            out.push(name)
+        }
+        return out
+    }
+
+    // After the loop: the variables get the strings that were built.
+    fn end_builders(self, names: [string]) {
+        for name in names {
+            var slot = self.builders[name]
+            self.builders.remove(name)
+            self.code.load(4, slot)
+            self.code.invokevirtual(BUILDER, "toString", "()Ljava/lang/String;")
+            self.store_name(name, checker.Type.Str)
+        }
+    }
+
+    // Adds the string `e` to the StringBuilder on the stack, piece by piece.
+    fn append_string(self, e: ast.Expr) {
+        var code = self.code
+        match e.kind {
+            Binary(op, lhs, rhs) {
+                if op == ast.BinOp.Add && self.ty(e) == checker.Type.Str {
+                    self.append_string(lhs)
+                    self.append_string(rhs)
+                    return
+                }
+            }
+            Str(parts) {
+                for p in parts {
+                    match p {
+                        Lit(text) {
+                            self.text(text)
+                            append(code, STRING_DESC)
+                        }
+                        Code(inner) {
+                            self.append_value(inner)
+                        }
+                    }
+                }
+                return
+            }
+            else {
+            }
+        }
+        self.expr(e)
+        append(code, STRING_DESC)
+    }
+
+    // The names of the variables that statement `s` adds strings to.
+    fn added_to(self, s: ast.Stmt, out: [string]) {
+        match s.kind {
+            Assign(target, op, value) {
+                match target.kind {
+                    Ident(name) {
+                        if self.ty(target) == checker.Type.Str {
+                            if op == ast.AssignOp.Add || self.adds_to(value, name) {
+                                out.push(name)
+                            }
+                        }
+                    }
+                    else {
+                    }
+                }
+                self.added_in_value(value, out)
+            }
+            Let(_, _, _, _, _, init) {
+                self.added_in_value(init, out)
+            }
+            Expr(e) {
+                self.added_in_value(e, out)
+            }
+            If(_, then, els) {
+                self.added_in_block(then, out)
+                for other in els {
+                    self.added_to(other, out)
+                }
+            }
+            While(_, body) {
+                self.added_in_block(body, out)
+            }
+            For(_, _, _, _, body) {
+                self.added_in_block(body, out)
+            }
+            Block(b) {
+                self.added_in_block(b, out)
+            }
+            else {
+            }
+        }
+    }
+
+    fn added_in_block(self, b: ast.Block, out: [string]) {
+        for s in b.stmts {
+            self.added_to(s, out)
+        }
+    }
+
+    // The block of a `catch` is made of statements too.
+    fn added_in_value(self, e: ast.Expr, out: [string]) {
+        match e.kind {
+            Catch(_, _, _, _, body) {
+                self.added_in_block(body, out)
+            }
+            else {
+            }
+        }
+    }
+
+    // Whether `e` is `name + more + ...`, with `name` nowhere else.
+    fn adds_to(self, e: ast.Expr, name: string) -> bool {
+        var pieces: [ast.Expr] = []
+        self.concat_parts(e, pieces)
+        if pieces.len() < 2 || !is_ident(pieces[0], name) {
+            return false
+        }
+        for i in 1..pieces.len() {
+            if mentions(pieces[i], name) {
+                return false
+            }
+        }
+        return true
+    }
+
+    // How statement `s` uses the string variable `name`: -1 when it needs
+    // its value, otherwise how many times it adds to it.
+    fn appends(self, s: ast.Stmt, name: string) -> int {
+        match s.kind {
+            Let(n, _, _, _, _, init) {
+                if n == name {
+                    return -1
+                }
+                return self.appends_value(init, name)
+            }
+            Assign(target, op, value) {
+                if is_ident(target, name) {
+                    if is_catch(value) {
+                        return -1
+                    }
+                    if op == ast.AssignOp.Add && !mentions(value, name) {
+                        return 1
+                    }
+                    if op == ast.AssignOp.Set && self.adds_to(value, name) {
+                        return 1
+                    }
+                    return -1
+                }
+                if self.reads(target, name) {
+                    return -1
+                }
+                return self.appends_value(value, name)
+            }
+            Expr(e) {
+                return self.appends_value(e, name)
+            }
+            If(cond, then, els) {
+                if self.reads(cond, name) {
+                    return -1
+                }
+                var total = self.appends_block(then, name)
+                for other in els {
+                    total = plus(total, self.appends(other, name))
+                }
+                return total
+            }
+            While(cond, body) {
+                if self.reads(cond, name) {
+                    return -1
+                }
+                return self.appends_block(body, name)
+            }
+            For(n, _, _, iter, body) {
+                if n == name || self.reads(iter, name) {
+                    return -1
+                }
+                return self.appends_block(body, name)
+            }
+            Return(value) {
+                for v in value {
+                    return self.appends_value(v, name)
+                }
+                return 0
+            }
+            Break, Continue {
+                return 0
+            }
+            Fail(e) {
+                return self.appends_value(e, name)
+            }
+            Send(channel, value) {
+                if self.reads(channel, name) || self.reads(value, name) {
+                    return -1
+                }
+                return 0
+            }
+            Block(b) {
+                return self.appends_block(b, name)
+            }
+            else {
+                return -1
+            }
+        }
+    }
+
+    fn appends_block(self, b: ast.Block, name: string) -> int {
+        var total = 0
+        for s in b.stmts {
+            total = plus(total, self.appends(s, name))
+        }
+        return total
+    }
+
+    // A value computed by a statement, which may have a `catch` block.
+    fn appends_value(self, e: ast.Expr, name: string) -> int {
+        match e.kind {
+            Catch(inner, err, _, _, body) {
+                if err == name || self.reads(inner, name) {
+                    return -1
+                }
+                return self.appends_block(body, name)
+            }
+            else {
+            }
+        }
+        if self.reads(e, name) {
+            return -1
+        }
+        return 0
+    }
+
+    // Whether `e` needs the value of the string variable `name`: anything
+    // but `name.len()` and `name == ""` (or `!=`).
+    fn reads(self, e: ast.Expr, name: string) -> bool {
+        match e.kind {
+            Call(callee, args) {
+                match callee.kind {
+                    Field(obj, method, _, _) {
+                        if method == "len" && args.len() == 0 && is_ident(obj, name) {
+                            return false
+                        }
+                    }
+                    else {
+                    }
+                }
+            }
+            Binary(op, lhs, rhs) {
+                if op == ast.BinOp.Eq || op == ast.BinOp.NotEq {
+                    if (is_ident(lhs, name) && is_empty_text(rhs)) || (is_ident(rhs, name) && is_empty_text(lhs)) {
+                        return false
+                    }
+                }
+            }
+            Lambda(_, _, _, _) {
+                return mentions(e, name)
+            }
+            Catch(_, _, _, _, _) {
+                return mentions(e, name)
+            }
+            Ident(n) {
+                return n == name
+            }
+            else {
+            }
+        }
+        for child in children(e) {
+            if self.reads(child, name) {
+                return true
+            }
+        }
+        return false
+    }
+
     // ---- conditions ----
 
     // Jumps to `label` when `e` is false; goes on when it is true.
@@ -2335,6 +2732,18 @@ struct Jvm {
             if op == ast.BinOp.NotEq {
                 jump = IF_ICMPNE
             }
+        } else if (op == ast.BinOp.Eq || op == ast.BinOp.NotEq) && ((self.built(lhs) >= 0 && is_empty_text(rhs)) || (self.built(rhs) >= 0 && is_empty_text(lhs))) {
+            // A string that a loop builds, against "": the length of its builder.
+            var slot = self.built(lhs)
+            if slot < 0 {
+                slot = self.built(rhs)
+            }
+            code.load(4, slot)
+            code.invokevirtual(BUILDER, "length", "()I")
+            jump = IFEQ
+            if op == ast.BinOp.NotEq {
+                jump = IFNE
+            }
         } else if lt == checker.Type.Str && rt == checker.Type.Str {
             self.expr(lhs)
             self.expr(rhs)
@@ -2345,7 +2754,10 @@ struct Jvm {
                     jump = IFEQ
                 }
             } else {
-                code.invokevirtual(STRING, "compareTo", "(Ljava/lang/String;)I")
+                // By their characters (see the runtime).
+                self.runtime("__jrt_str_compare")
+                code.lconst(0)
+                code.op(LCMP, -3)
                 jump = zero_jump(op)
             }
         } else if self.variant_of(lhs) >= 0 || self.variant_of(rhs) >= 0 {
@@ -2867,6 +3279,18 @@ struct Jvm {
         c.method(classfile.ACC_PUBLIC, "item", "()Ljava/lang/Object;", item)
     }
 
+    // `onyx.Body`: the program, as a java.lang.Runnable, for the runtime to
+    // run as the task of `main`.
+    fn ensure_body_class(self) {
+        var c = self.class_named("onyx/Body", classfile.ACC_PUBLIC | classfile.ACC_SUPER, OBJECT)
+        c.interfaces.push("java/lang/Runnable")
+        self.constructor(c, OBJECT)
+        var code = classfile.new_code(c.pool, 1)
+        code.invokestatic(MAIN, "body$", "()V")
+        code.return_value(5)
+        c.method(classfile.ACC_PUBLIC, "run", "()V", code)
+    }
+
     // `onyx.Task`: what a task's thread runs. It waits for its turn, runs
     // the function of the `fork` block, and lets the next task go on.
     fn ensure_task_class(self) {
@@ -3096,6 +3520,10 @@ struct Jvm {
         var helper = "__jrt_" + name
         if self.items.has(checker.fn_key(helper)) {
             self.call_runtime(helper, args, e)
+            if name == "fetch" {
+                // Awaited on the JavaScript target.
+                self.yield_point()
+            }
             return
         }
         self.unsupported(e.start, e.end, "the built-in function `{name}`")
@@ -3137,10 +3565,20 @@ struct Jvm {
         }
         match recv {
             Str {
-                if name == "len" {
-                    self.expr(obj)
-                    code.invokevirtual(STRING, "length", "()I")
+                if name == "len" && self.built(obj) >= 0 {
+                    // A string that a loop builds: the length of its builder.
+                    var slot = self.built(obj)
+                    code.load(4, slot)
+                    code.iconst(0)
+                    code.load(4, slot)
+                    code.invokevirtual(BUILDER, "length", "()I")
+                    code.invokevirtual(BUILDER, "codePointCount", "(II)I")
                     code.op(I2L, 1)
+                    return
+                }
+                if name == "len" || name == "index_of" {
+                    // Counted in characters (see the runtime).
+                    self.call_runtime("__jrt_str_" + name, values, e)
                     return
                 }
                 if name == "upper" || name == "lower" {
@@ -3153,7 +3591,7 @@ struct Jvm {
                     }
                     return
                 }
-                if name == "contains" || name == "starts_with" || name == "ends_with" || name == "index_of" || name == "replace" {
+                if name == "contains" || name == "starts_with" || name == "ends_with" || name == "replace" {
                     self.expr(obj)
                     for a in args {
                         self.expr(a)
@@ -3164,9 +3602,6 @@ struct Jvm {
                         code.invokevirtual(STRING, "startsWith", "(Ljava/lang/String;)Z")
                     } else if name == "ends_with" {
                         code.invokevirtual(STRING, "endsWith", "(Ljava/lang/String;)Z")
-                    } else if name == "index_of" {
-                        code.invokevirtual(STRING, "indexOf", "(Ljava/lang/String;)I")
-                        code.op(I2L, 1)
                     } else {
                         code.invokevirtual(STRING, "replace", "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;")
                     }
@@ -3456,6 +3891,232 @@ struct Jvm {
 }
 
 // ---- free helpers ----
+
+// The `var` of a top-level variable: the statement itself, or the last one
+// of the block that lower.ox made of it.
+fn global_let(stmt: ast.Stmt) -> ast.Stmt {
+    match stmt.kind {
+        Block(b) {
+            return b.stmts[b.stmts.len() - 1]
+        }
+        else {
+            return stmt
+        }
+    }
+}
+
+fn is_ident(e: ast.Expr, name: string) -> bool {
+    match e.kind {
+        Ident(n) {
+            return n == name
+        }
+        else {
+            return false
+        }
+    }
+}
+
+fn is_empty_text(e: ast.Expr) -> bool {
+    match e.kind {
+        Str(parts) {
+            if parts.len() == 0 {
+                return true
+            }
+            if parts.len() == 1 {
+                match parts[0] {
+                    Lit(text) {
+                        return text == ""
+                    }
+                    else {
+                    }
+                }
+            }
+        }
+        else {
+        }
+    }
+    return false
+}
+
+// -1 when either is -1, else their sum.
+fn plus(a: int, b: int) -> int {
+    if a < 0 || b < 0 {
+        return -1
+    }
+    return a + b
+}
+
+// The expressions directly inside `e`, but those inside the statements of
+// a lambda or of a `catch` block.
+fn children(e: ast.Expr) -> [ast.Expr] {
+    var out: [ast.Expr] = []
+    match e.kind {
+        Str(parts) {
+            for p in parts {
+                match p {
+                    Code(inner) {
+                        out.push(inner)
+                    }
+                    else {
+                    }
+                }
+            }
+        }
+        List(items) {
+            for item in items {
+                out.push(item)
+            }
+        }
+        Map(entries) {
+            for entry in entries {
+                out.push(entry.key)
+                out.push(entry.value)
+            }
+        }
+        StructLit(_, _, _, fields) {
+            for f in fields {
+                out.push(f.value)
+            }
+        }
+        Unary(_, inner) {
+            out.push(inner)
+        }
+        Binary(_, lhs, rhs) {
+            out.push(lhs)
+            out.push(rhs)
+        }
+        Call(callee, args) {
+            out.push(callee)
+            for a in args {
+                out.push(a)
+            }
+        }
+        Field(obj, _, _, _) {
+            out.push(obj)
+        }
+        Index(obj, index) {
+            out.push(obj)
+            out.push(index)
+        }
+        Try(inner) {
+            out.push(inner)
+        }
+        Or(inner, default) {
+            out.push(inner)
+            out.push(default)
+        }
+        Catch(inner, _, _, _, _) {
+            out.push(inner)
+        }
+        Recv(inner) {
+            out.push(inner)
+        }
+        ChanNew(_, cap) {
+            for c in cap {
+                out.push(c)
+            }
+        }
+        Range(lo, hi) {
+            out.push(lo)
+            out.push(hi)
+        }
+        else {
+        }
+    }
+    return out
+}
+
+// Whether `name` appears anywhere in `e`, the blocks inside it included.
+fn mentions(e: ast.Expr, name: string) -> bool {
+    match e.kind {
+        Ident(n) {
+            return n == name
+        }
+        Lambda(params, _, _, body) {
+            for p in params {
+                if p.name == name {
+                    return true
+                }
+            }
+            return block_mentions(body, name)
+        }
+        Catch(inner, err, _, _, body) {
+            return err == name || mentions(inner, name) || block_mentions(body, name)
+        }
+        else {
+        }
+    }
+    for child in children(e) {
+        if mentions(child, name) {
+            return true
+        }
+    }
+    return false
+}
+
+fn block_mentions(b: ast.Block, name: string) -> bool {
+    for s in b.stmts {
+        if stmt_mentions(s, name) {
+            return true
+        }
+    }
+    return false
+}
+
+fn stmt_mentions(s: ast.Stmt, name: string) -> bool {
+    match s.kind {
+        Let(n, _, _, _, _, init) {
+            return n == name || mentions(init, name)
+        }
+        Assign(target, _, value) {
+            return mentions(target, name) || mentions(value, name)
+        }
+        Expr(e) {
+            return mentions(e, name)
+        }
+        If(cond, then, els) {
+            if mentions(cond, name) || block_mentions(then, name) {
+                return true
+            }
+            for other in els {
+                if stmt_mentions(other, name) {
+                    return true
+                }
+            }
+            return false
+        }
+        While(cond, body) {
+            return mentions(cond, name) || block_mentions(body, name)
+        }
+        For(n, _, _, iter, body) {
+            return n == name || mentions(iter, name) || block_mentions(body, name)
+        }
+        Return(value) {
+            for v in value {
+                return mentions(v, name)
+            }
+            return false
+        }
+        Fail(e) {
+            return mentions(e, name)
+        }
+        Fork(b) {
+            return block_mentions(b, name)
+        }
+        Send(channel, value) {
+            return mentions(channel, name) || mentions(value, name)
+        }
+        Block(b) {
+            return block_mentions(b, name)
+        }
+        Match(_, _, _) {
+            return true
+        }
+        else {
+            return false
+        }
+    }
+}
 
 fn is_comparison(op: ast.BinOp) -> bool {
     return op == ast.BinOp.Eq || op == ast.BinOp.NotEq || op == ast.BinOp.Lt || op == ast.BinOp.Le || op == ast.BinOp.Gt || op == ast.BinOp.Ge

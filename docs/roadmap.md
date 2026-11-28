@@ -54,8 +54,8 @@ See [the JVM target](jvm.md).
 
 1. **The JVM target** (done): `--target jvm` writes a `.jar`, class files
    and archive included, with the runtime written in Onyx. The whole
-   language works, tasks included, except `fetch`; the compiler itself runs
-   on the JVM and compiles itself into the same `.jar`.
+   language works, tasks and `fetch` included; the compiler itself runs on
+   the JVM and compiles itself into the same `.jar`.
 2. **The door to Java**: declaring Java classes and calling them, typed.
 3. **Minecraft plugins**: a `.jar` per program that Paper loads, and a
    typed `minecraft` module (events, commands, players, worlds) that keeps

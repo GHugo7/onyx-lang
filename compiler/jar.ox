@@ -119,10 +119,15 @@ struct Jar {
     }
 }
 
-// A jar whose program starts in the class `main_class` (`a/b/Main`).
-fn new_jar(main_class: string) -> Jar {
+// A jar whose program starts in the class `main_class` (`a/b/Main`), with
+// these other lines in its manifest (`Add-Exports: ...`).
+fn new_jar(main_class: string, headers: [string]) -> Jar {
     var jar = Jar{files: []}
-    var manifest = "Manifest-Version: 1.0\r\nMain-Class: " + main_class.replace("/", ".") + "\r\nCreated-By: Onyx\r\n\r\n"
+    var manifest = "Manifest-Version: 1.0\r\nMain-Class: " + main_class.replace("/", ".") + "\r\n"
+    for line in headers {
+        manifest += line + "\r\n"
+    }
+    manifest += "Created-By: Onyx\r\n\r\n"
     jar.add("META-INF/MANIFEST.MF", bytes(manifest))
     return jar
 }

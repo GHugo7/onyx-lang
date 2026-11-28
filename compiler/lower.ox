@@ -70,7 +70,19 @@ fn lower_for(program: ast.Program, an: checker.Analysis, jvm: bool) {
             Global(stmt) {
                 match stmt.kind {
                     Let(_, _, _, _, _, init) {
-                        l.lambdas(init)
+                        if jvm {
+                            // Its value is computed like a statement's: what it
+                            // needs first goes before it, and the variable
+                            // becomes the last statement of a block.
+                            var copy = ast.Stmt{kind: stmt.kind, start: stmt.start, end: stmt.end}
+                            var out: [ast.Stmt] = []
+                            l.stmt(copy, out)
+                            if out.len() > 1 {
+                                stmt.kind = ast.StmtKind.Block(ast.Block{stmts: out, start: stmt.start, end: stmt.end})
+                            }
+                        } else {
+                            l.lambdas(init)
+                        }
                     }
                     else {
                     }

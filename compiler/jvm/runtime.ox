@@ -130,6 +130,13 @@ fn __jrt_failure_of(problem: __object) -> __object {
     if __jvm("is onyx/Failure", problem) {
         return problem
     }
+    // What went wrong on another thread comes wrapped.
+    if __jvm("is java/util/concurrent/ExecutionException", problem) || __jvm("is java/util/concurrent/CompletionException", problem) {
+        var cause = __jvm("virtual java/lang/Throwable.getCause()Ljava/lang/Throwable;", problem)
+        if !__jrt_is_null(cause) {
+            return __jrt_failure_of(cause)
+        }
+    }
     return __jvm("new onyx/Failure(Ljava/lang/String;)", __jrt_reason(problem))
 }
 
@@ -158,6 +165,15 @@ fn __jrt_reason(problem: __object) -> string {
     }
     if message.contains("error=8,") {
         return "exec format error"
+    }
+    if __jvm("is java/net/ConnectException", problem) {
+        return "connection refused"
+    }
+    if __jvm("is java/net/UnknownHostException", problem) {
+        return "unknown host"
+    }
+    if __jvm("is java/net/http/HttpTimeoutException", problem) {
+        return "timed out"
     }
     if message == "" {
         return __jvm("virtual java/lang/Object.toString()Ljava/lang/String;", problem)
@@ -210,20 +226,21 @@ fn __jrt_is_null(v: __object) -> bool {
 // `a == b`, for values of any type: lists, maps, structs and enums are
 // equal when what they hold is.
 fn __jrt_eq(a: __object, b: __object) -> bool {
+    if __jvm("is java/lang/Double", a) {
+        if !__jvm("is java/lang/Double", b) {
+            return false
+        }
+        // As numbers, even when they are the same object: NaN is not equal
+        // to itself, -0.0 is 0.0.
+        var x: float = a
+        var y: float = b
+        return x == y
+    }
     if __jvm("same", a, b) {
         return true
     }
     if __jrt_is_null(a) || __jrt_is_null(b) {
         return false
-    }
-    if __jvm("is java/lang/Double", a) {
-        if !__jvm("is java/lang/Double", b) {
-            return false
-        }
-        // As numbers: NaN is not equal to itself, -0.0 is 0.0.
-        var x: float = a
-        var y: float = b
-        return x == y
     }
     if __jvm("is java/lang/Long", a) || __jvm("is java/lang/String", a) || __jvm("is java/lang/Boolean", a) {
         return __jvm("virtual java/lang/Object.equals(Ljava/lang/Object;)Z", a, b)
@@ -543,14 +560,115 @@ fn __jrt_parse_float(text: string) -> float! {
 }
 
 // ---- strings ----
+//
+// Positions and lengths count characters, as on the native target. A Java
+// string is made of UTF-16 units, and a character above U+FFFF (most
+// emoji) takes two of them. Few strings hold such characters, and Java
+// tells at once that a string has none when all its characters are among
+// the first 256. The last string whose positions were looked for is kept
+// with what is known of it: a loop that goes through a string with `s[i]`
+// finds each character from the one before.
 
-// `s[i]`: one UTF-16 unit, as on the JavaScript target.
+var __jrt_at_text = __jvm("null")
+// Its number of characters, and whether each one is a single unit.
+var __jrt_at_count = 0
+var __jrt_at_plain = true
+// A character of it, and the unit where that character starts.
+var __jrt_at_char = 0
+var __jrt_at_unit = 0
+
+// The number of UTF-16 units of a string.
+fn __jrt_units(s: string) -> int {
+    return __jvm("virtual java/lang/String.length()I", s)
+}
+
+// Makes `s` the string whose positions are looked for.
+fn __jrt_look_at(s: string) {
+    if __jvm("same", s, __jrt_at_text) {
+        return
+    }
+    var units = __jrt_units(s)
+    var count = __jvm("virtual java/lang/String.codePointCount(II)I", s, 0, units)
+    __jrt_at_text = s
+    __jrt_at_count = count
+    __jrt_at_plain = count == units
+    __jrt_at_char = 0
+    __jrt_at_unit = 0
+}
+
+// `s.len()`: its number of characters.
+fn __jrt_str_len(s: string) -> int {
+    __jrt_look_at(s)
+    return __jrt_at_count
+}
+
+// The unit where the character number `i` of `s` starts (0 <= i <= its
+// length).
+fn __jrt_unit_of(s: string, i: int) -> int {
+    __jrt_look_at(s)
+    if __jrt_at_plain {
+        return i
+    }
+    if i < __jrt_at_char {
+        __jrt_at_char = 0
+        __jrt_at_unit = 0
+    }
+    __jrt_at_unit = __jvm("virtual java/lang/String.offsetByCodePoints(II)I", s, __jrt_at_unit, i - __jrt_at_char)
+    __jrt_at_char = i
+    return __jrt_at_unit
+}
+
+// Whether each character of `s` is a single unit.
+fn __jrt_plain(s: string) -> bool {
+    var units = __jrt_units(s)
+    return __jvm("virtual java/lang/String.codePointCount(II)I", s, 0, units) == units
+}
+
+// `s[i]`: the character number `i`.
 fn __jrt_char_at(s: string, i: int) -> string {
-    var n = s.len()
+    var n = __jrt_str_len(s)
     if i < 0 || i >= n {
         panic("index out of bounds: index {i}, length {n}")
     }
-    return __jvm("virtual java/lang/String.substring(II)Ljava/lang/String;", s, i, i + 1)
+    var at = __jrt_unit_of(s, i)
+    var width = 1
+    if !__jrt_at_plain {
+        width = __jvm("static java/lang/Character.charCount(I)I", __jvm("virtual java/lang/String.codePointAt(I)I", s, at))
+    }
+    return __jvm("virtual java/lang/String.substring(II)Ljava/lang/String;", s, at, at + width)
+}
+
+// `s.index_of(needle)`: the character where `needle` starts, or -1.
+fn __jrt_str_index_of(s: string, needle: string) -> int {
+    var at = __jvm("virtual java/lang/String.indexOf(Ljava/lang/String;)I", s, needle)
+    if at <= 0 || __jrt_plain(s) {
+        return at
+    }
+    return __jvm("virtual java/lang/String.codePointCount(II)I", s, 0, at)
+}
+
+// How two strings compare, by their characters, as on the native target:
+// below 0, 0 or above 0. Java compares UTF-16 units, which only differs
+// where a character above U+FFFF meets one from U+E000 to U+FFFF.
+fn __jrt_str_compare(a: string, b: string) -> int {
+    var r = __jvm("virtual java/lang/String.compareTo(Ljava/lang/String;)I", a, b)
+    if r == 0 || (__jrt_plain(a) && __jrt_plain(b)) {
+        return r
+    }
+    var na = __jrt_units(a)
+    var nb = __jrt_units(b)
+    var i = 0
+    var j = 0
+    while i < na && j < nb {
+        var x = __jvm("virtual java/lang/String.codePointAt(I)I", a, i)
+        var y = __jvm("virtual java/lang/String.codePointAt(I)I", b, j)
+        if x != y {
+            return x - y
+        }
+        i += __jvm("static java/lang/Character.charCount(I)I", x)
+        j += __jvm("static java/lang/Character.charCount(I)I", y)
+    }
+    return (na - i) - (nb - j)
 }
 
 fn __jrt_unit(s: string, i: int) -> int {
@@ -564,7 +682,7 @@ fn __jrt_is_blank(c: int) -> bool {
 
 fn __jrt_str_trim(s: string) -> string {
     var start = 0
-    var end = s.len()
+    var end = __jrt_units(s)
     while start < end && __jrt_is_blank(__jrt_unit(s, start)) {
         start += 1
     }
@@ -586,7 +704,7 @@ fn __jrt_str_split(s: string, sep: string) -> [string] {
             break
         }
         out.push(__jvm("virtual java/lang/String.substring(II)Ljava/lang/String;", s, start, at))
-        start = at + sep.len()
+        start = at + __jrt_units(sep)
     }
     out.push(__jvm("virtual java/lang/String.substring(I)Ljava/lang/String;", s, start))
     return out
@@ -609,13 +727,14 @@ fn __jrt_clamp(i: int, n: int) -> int {
 }
 
 fn __jrt_str_slice(s: string, from: int, to: int) -> string {
-    var n = s.len()
+    var n = __jrt_str_len(s)
     var a = __jrt_clamp(from, n)
     var b = __jrt_clamp(to, n)
     if a >= b {
         return ""
     }
-    return __jvm("virtual java/lang/String.substring(II)Ljava/lang/String;", s, a, b)
+    var start = __jrt_unit_of(s, a)
+    return __jvm("virtual java/lang/String.substring(II)Ljava/lang/String;", s, start, __jrt_unit_of(s, b))
 }
 
 fn __jrt_str_repeat(s: string, n: int) -> string {
@@ -775,32 +894,13 @@ fn __jrt_list_join(list: [__object], separator: string) -> string {
     return __jvm("virtual java/lang/Object.toString()Ljava/lang/String;", out)
 }
 
-// Is `a` before `b`? Numbers and strings, as `<` compares them.
-fn __jrt_less(a: __object, b: __object) -> bool {
-    if __jvm("is java/lang/String", a) {
-        var x: string = a
-        var y: string = b
-        return x < y
-    }
-    if __jvm("is java/lang/Long", a) && __jvm("is java/lang/Long", b) {
-        var x: int = a
-        var y: int = b
-        return x < y
-    }
-    var x: float = a
-    var y: float = b
-    return x < y
-}
-
 // How two keys compare, as `<` sees them: below 0, 0 or above 0.
 fn __jrt_compare(a: __object, b: __object) -> int {
     if __jvm("is java/lang/Long", a) && __jvm("is java/lang/Long", b) {
         return __jvm("static java/lang/Long.compare(JJ)I", a, b)
     }
     if __jvm("is java/lang/String", a) {
-        var x: string = a
-        var y: string = b
-        return __jvm("virtual java/lang/String.compareTo(Ljava/lang/String;)I", x, y)
+        return __jrt_str_compare(a, b)
     }
     var x: float = a
     var y: float = b
@@ -830,11 +930,19 @@ fn __jrt_list_sort_by(items: [__object], keys: [__object]) -> [__object] {
 }
 
 fn __jrt_list_sort(list: [__object]) -> [__object] {
-    if list.len() > 0 && __jvm("is java/lang/Double", list[0]) {
-        // Floats as `<` sees them: -0.0 and 0.0 are equal.
+    // Java's own order is that of `<` for ints, and for strings whose
+    // characters are each a single unit. Floats (-0.0 is 0.0 for `<`) and
+    // the other strings are compared by `__jrt_compare`.
+    var own = true
+    for item in list {
+        if __jvm("is java/lang/Double", item) || (__jvm("is java/lang/String", item) && !__jrt_plain(item)) {
+            own = false
+            break
+        }
+    }
+    if !own {
         return __jrt_list_sort_by(list, list)
     }
-    // Ints and strings: Java's own order is that of `<`.
     var out: [__object] = __jvm("new java/util/ArrayList(Ljava/util/Collection;)", list)
     __jvm("virtual java/util/ArrayList.sort(Ljava/util/Comparator;)V", out, __jvm("null"))
     return out
@@ -1177,25 +1285,9 @@ fn __jrt_list_dir(path: string) -> [string]! {
     for i in 0..n {
         out.push(__jvm("interface java/util/List.get(I)Ljava/lang/Object;", all, i))
     }
-    // By their bytes, as on the other targets.
-    var keys: [__object] = []
-    for name in out {
-        keys.push(__jrt_byte_key(name))
-    }
-    var sorted: [string] = []
-    for name in __jrt_list_sort_by(out, keys) {
-        sorted.push(name)
-    }
-    return sorted
-}
-
-// A text that sorts as the UTF-8 bytes of `name` do.
-fn __jrt_byte_key(name: string) -> string {
-    var out = ""
-    for b in bytes(name) {
-        out += chr(b + 256)
-    }
-    return out
+    // In the order of their characters, which is that of their bytes, as
+    // on the other targets.
+    return out.sort()
 }
 
 // Runs a program, with the same input and output; its exit code.
@@ -1231,29 +1323,39 @@ fn __jrt_run_program(path: string, arguments: [string]) -> int! {
 // ready goes on. The order in which they take turns is the one of the
 // other targets, so that a program prints the same thing everywhere.
 //
-// Each task runs on a Java thread of its own, but only the one whose turn
-// it is runs: the others are parked until they get it back.
+// How a task is put aside and taken up again depends on the JVM:
+//
+// 0. Continuations, with Java 21 and later when the .jar was launched with
+//    `java -jar` (its manifest asks for them): every task is a
+//    continuation, a stack of its own that the JVM puts aside and gives
+//    back, all of them on the one thread of the program. Passing the turn
+//    takes a fifth of a microsecond.
+// 1. Virtual threads, with Java 21 and later otherwise: a thread per task,
+//    all of them on one carrier thread; the one whose turn it is runs, the
+//    others are parked.
+// 2. Threads of the system, as 1, with older versions of Java: passing the
+//    turn wakes a thread up, a matter of microseconds.
 
 struct __JrtTask {
-    // The Java thread that runs it.
+    // Its thread (1 and 2), or its continuation (0).
     thread: __object
+    cont: __object
     // The value it is sending, or the one it received.
     value: __object
     // Whether a value was handed to it.
     got: bool
-    // When it wakes up, if it sleeps (milliseconds).
+    // When it wakes up, if it sleeps (in nanoseconds of the JVM's clock:
+    // two tasks that fall asleep in the same millisecond still wake up in
+    // the right order).
     wake: int
 }
 
 fn __jrt_new_task(thread: __object) -> __JrtTask {
-    return __JrtTask{thread: thread, value: __jvm("null"), got: false, wake: 0}
+    return __JrtTask{thread: thread, cont: __jvm("null"), value: __jvm("null"), got: false, wake: 0}
 }
 
 // Whether the program has started tasks.
 var __jrt_tasks_on = false
-// Virtual threads (Java 21 and later) pass the turn far faster than the
-// threads of the system.
-var __jrt_virtual_threads = __jvm("virtual java/lang/Runtime$Version.feature()I", __jvm("static java/lang/Runtime.version()Ljava/lang/Runtime$Version;")) >= 21
 var __jrt_main_task = __jrt_new_task(__jvm("static java/lang/Thread.currentThread()Ljava/lang/Thread;"))
 var __jrt_current_task = __jrt_main_task
 // The tasks that can go on, in the order they will.
@@ -1261,17 +1363,70 @@ var __jrt_ready: [__JrtTask] = []
 // The tasks that sleep, in the order they wake up.
 var __jrt_timers: [__JrtTask] = []
 var __jrt_main_done = false
-// The task whose turn it is, as every thread sees it.
+// The task whose turn it is, as every thread sees it (1 and 2).
 var __jrt_turn = __jvm("new java/util/concurrent/atomic/AtomicReference(Ljava/lang/Object;)", __jrt_main_task)
+// How tasks take turns: 0, 1 or 2, as above.
+var __jrt_switching = __jrt_switching_mode()
+// The scope of the continuations (0).
+var __jrt_scope = __jvm("null")
 
-// Hands the turn to `next`, whose thread then goes on.
+fn __jrt_switching_mode() -> int {
+    var version = __jvm("virtual java/lang/Runtime$Version.feature()I", __jvm("static java/lang/Runtime.version()Ljava/lang/Runtime$Version;"))
+    // ONYX_JVM_SWITCHING=1 or 2 asks for a slower way, to test it.
+    var asked = parse_int(env("ONYX_JVM_SWITCHING") or "0") or 0
+    if version < 21 || asked == 2 {
+        return 2
+    }
+    // Continuations are the JVM's own (jdk.internal.vm): they may be used
+    // when the JVM lets the program reach them.
+    var base = __jvm("virtual java/lang/Class.getModule()Ljava/lang/Module;", __jvm("virtual java/lang/Object.getClass()Ljava/lang/Class;", __jvm("new java/lang/Object()")))
+    var mine = __jvm("virtual java/lang/Class.getModule()Ljava/lang/Module;", __jvm("virtual java/lang/Object.getClass()Ljava/lang/Class;", __jrt_new_task(__jvm("null"))))
+    if asked == 0 && __jvm("virtual java/lang/Module.isExported(Ljava/lang/String;Ljava/lang/Module;)Z", base, "jdk.internal.vm", mine) {
+        return 0
+    }
+    // Virtual threads pass the turn fastest when they share one carrier.
+    var key = "jdk.virtualThreadScheduler.parallelism"
+    if __jrt_is_null(__jvm("static java/lang/System.getProperty(Ljava/lang/String;)Ljava/lang/String;", key)) {
+        __jvm("static java/lang/System.setProperty(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", key, "1")
+    }
+    return 1
+}
+
+// A continuation that runs `body`, a java.lang.Runnable (0).
+fn __jrt_continuation(body: __object) -> __object {
+    if __jrt_is_null(__jrt_scope) {
+        __jrt_scope = __jvm("new jdk/internal/vm/ContinuationScope(Ljava/lang/String;)", "onyx")
+    }
+    return __jvm("new jdk/internal/vm/Continuation(Ljdk/internal/vm/ContinuationScope;Ljava/lang/Runnable;)", __jrt_scope, body)
+}
+
+// Runs the program (`body`, a java.lang.Runnable) as the task of `main`.
+fn __jrt_start(body: __object) {
+    if __jrt_switching != 0 {
+        __jvm("interface java/lang/Runnable.run()V", body)
+        return
+    }
+    // The first continuation and the first sleep take the JVM some time to
+    // prepare (classes to load and set up): that is done before the program
+    // starts, so that its tasks take their turns on time.
+    var warm = __jrt_continuation(__jvm("new java/lang/Thread()"))
+    __jvm("virtual jdk/internal/vm/Continuation.run()V", warm)
+    __jvm("static java/lang/Thread.sleep(J)V", 0)
+    __jrt_main_task.cont = __jrt_continuation(body)
+    // Each turn, the task whose turn it is runs until it stops.
+    while !__jvm("virtual jdk/internal/vm/Continuation.isDone()Z", __jrt_main_task.cont) {
+        __jvm("virtual jdk/internal/vm/Continuation.run()V", __jrt_current_task.cont)
+    }
+}
+
+// Hands the turn to `next`, whose thread then goes on (1 and 2).
 fn __jrt_give_turn(next: __JrtTask) {
     __jrt_current_task = next
     __jvm("virtual java/util/concurrent/atomic/AtomicReference.set(Ljava/lang/Object;)V", __jrt_turn, next)
     __jvm("static java/util/concurrent/locks/LockSupport.unpark(Ljava/lang/Thread;)V", next.thread)
 }
 
-// Waits until it is the turn of `me`.
+// Waits until it is the turn of `me` (1 and 2).
 fn __jrt_wait_turn(me: __JrtTask) {
     while !__jvm("same", __jvm("virtual java/util/concurrent/atomic/AtomicReference.get()Ljava/lang/Object;", __jrt_turn), me) {
         __jvm("static java/util/concurrent/locks/LockSupport.park()V")
@@ -1293,11 +1448,23 @@ fn __jrt_next_task() -> __JrtTask {
         __jvm("static java/lang/System.exit(I)V", 2)
     }
     var sleeper = __jrt_timers.remove(0)
-    var wait = sleeper.wake - now()
+    var wait = sleeper.wake - __jvm("static java/lang/System.nanoTime()J")
     if wait > 0 {
-        __jvm("static java/lang/Thread.sleep(J)V", wait)
+        __jvm("static java/lang/Thread.sleep(JI)V", wait / 1000000, wait % 1000000)
     }
     return sleeper
+}
+
+// `next` goes on, and `me` waits for its turn.
+fn __jrt_switch(me: __JrtTask, next: __JrtTask) {
+    if __jrt_switching == 0 {
+        // Back to the loop of `__jrt_start`, which runs `next`.
+        __jrt_current_task = next
+        __jvm("static jdk/internal/vm/Continuation.yield(Ljdk/internal/vm/ContinuationScope;)Z", __jrt_scope)
+        return
+    }
+    __jrt_give_turn(next)
+    __jrt_wait_turn(me)
 }
 
 // `me` cannot go on for now (it stands in some line): the next task runs.
@@ -1305,8 +1472,7 @@ fn __jrt_next_task() -> __JrtTask {
 fn __jrt_schedule(me: __JrtTask) {
     var next = __jrt_next_task()
     if !__jvm("same", next, me) {
-        __jrt_give_turn(next)
-        __jrt_wait_turn(me)
+        __jrt_switch(me, next)
     }
 }
 
@@ -1328,35 +1494,46 @@ fn __jrt_fork(f: __object) {
     var me = __jrt_current_task
     var task = __jrt_new_task(__jvm("null"))
     var runner = __jvm("new onyx/Task(Ljava/lang/Object;Ljava/lang/Object;)", f, task)
-    var thread = __jvm("null")
-    if __jrt_virtual_threads {
-        thread = __jvm("interface java/lang/Thread$Builder.unstarted(Ljava/lang/Runnable;)Ljava/lang/Thread;", __jvm("static java/lang/Thread.ofVirtual()Ljava/lang/Thread$Builder$OfVirtual;"), runner)
-    } else {
-        thread = __jvm("new java/lang/Thread(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;J)", __jvm("null"), runner, "onyx task", 16777216)
-        __jvm("virtual java/lang/Thread.setDaemon(Z)V", thread, true)
-    }
-    task.thread = thread
     __jrt_ready.insert(0, me)
-    __jvm("virtual java/lang/Thread.start()V", thread)
-    __jrt_give_turn(task)
-    __jrt_wait_turn(me)
+    if __jrt_switching == 0 {
+        task.cont = __jrt_continuation(runner)
+    } else {
+        var thread = __jvm("null")
+        if __jrt_switching == 1 {
+            thread = __jvm("interface java/lang/Thread$Builder.unstarted(Ljava/lang/Runnable;)Ljava/lang/Thread;", __jvm("static java/lang/Thread.ofVirtual()Ljava/lang/Thread$Builder$OfVirtual;"), runner)
+        } else {
+            thread = __jvm("new java/lang/Thread(Ljava/lang/ThreadGroup;Ljava/lang/Runnable;Ljava/lang/String;J)", __jvm("null"), runner, "onyx task", 16777216)
+            __jvm("virtual java/lang/Thread.setDaemon(Z)V", thread, true)
+        }
+        task.thread = thread
+        __jvm("virtual java/lang/Thread.start()V", thread)
+    }
+    __jrt_switch(me, task)
 }
 
-// The thread of a task starts here, and waits for its turn.
+// A task starts here (its thread waits for its turn).
 fn __jrt_task_begin(task: __object) {
-    var me: __JrtTask = task
-    __jrt_wait_turn(me)
+    if __jrt_switching != 0 {
+        var me: __JrtTask = task
+        __jrt_wait_turn(me)
+    }
 }
 
-// A task is done: the next one goes on, and its thread ends.
+// A task is done: the next one goes on.
 fn __jrt_task_end(task: __object) {
-    __jrt_give_turn(__jrt_next_task())
+    var next = __jrt_next_task()
+    if __jrt_switching == 0 {
+        // Its continuation ends; the loop of `__jrt_start` runs `next`.
+        __jrt_current_task = next
+        return
+    }
+    __jrt_give_turn(next)
 }
 
 // `sleep` in a program with tasks: the others run meanwhile.
 fn __jrt_task_sleep(ms: int) {
     var me = __jrt_current_task
-    var wake = now() + max(ms, 1)
+    var wake = __jvm("static java/lang/System.nanoTime()J") + max(ms, 1) * 1000000
     me.wake = wake
     var at = 0
     while at < __jrt_timers.len() && __jrt_timers[at].wake <= wake {
@@ -1469,4 +1646,53 @@ fn __jrt_chan_close(ch: __JrtChan) {
         receiver.got = false
         __jrt_ready.push(receiver)
     }
+}
+
+// ---- the network ----
+
+// The client that `fetch` uses, made the first time.
+var __jrt_http = __jvm("null")
+
+// `fetch(url)`: what is at `url`, by HTTP or HTTPS (redirections
+// followed). While the answer comes, the other tasks run, as on the
+// JavaScript target.
+fn __jrt_fetch(url: string) -> string! {
+    if __jrt_is_null(__jrt_http) {
+        var builder = __jvm("static java/net/http/HttpClient.newBuilder()Ljava/net/http/HttpClient$Builder;")
+        __jvm("interface java/net/http/HttpClient$Builder.followRedirects(Ljava/net/http/HttpClient$Redirect;)Ljava/net/http/HttpClient$Builder;", builder, __jvm("get java/net/http/HttpClient$Redirect.NORMAL:Ljava/net/http/HttpClient$Redirect;"))
+        __jrt_http = __jvm("interface java/net/http/HttpClient$Builder.build()Ljava/net/http/HttpClient;", builder)
+    }
+    var uri = __jvm("static! java/net/URI.create(Ljava/lang/String;)Ljava/net/URI;", url) catch err {
+        fail "cannot fetch " + __jrt_quote(url) + ": invalid URL"
+    }
+    var request = __jvm("static! java/net/http/HttpRequest.newBuilder(Ljava/net/URI;)Ljava/net/http/HttpRequest$Builder;", uri) catch err {
+        fail "cannot fetch " + __jrt_quote(url) + ": invalid URL"
+    }
+    var body = __jvm("static java/net/http/HttpResponse$BodyHandlers.ofString()Ljava/net/http/HttpResponse$BodyHandler;")
+    var answer = __jvm("virtual java/net/http/HttpClient.sendAsync(Ljava/net/http/HttpRequest;Ljava/net/http/HttpResponse$BodyHandler;)Ljava/util/concurrent/CompletableFuture;", __jrt_http, __jvm("interface java/net/http/HttpRequest$Builder.build()Ljava/net/http/HttpRequest;", request), body)
+    while !__jvm("virtual java/util/concurrent/CompletableFuture.isDone()Z", answer) {
+        if __jrt_ready.len() > 0 {
+            __jrt_yield()
+        } else if __jrt_timers.len() > 0 {
+            // Wait for the answer, or for the first sleeper to wake up.
+            var wait = __jrt_timers[0].wake - __jvm("static java/lang/System.nanoTime()J")
+            if wait > 0 {
+                __jvm("virtual! java/util/concurrent/CompletableFuture.get(JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;", answer, wait, __jvm("get java/util/concurrent/TimeUnit.NANOSECONDS:Ljava/util/concurrent/TimeUnit;")) catch err {
+                }
+            }
+            while __jrt_timers.len() > 0 && __jrt_timers[0].wake <= __jvm("static java/lang/System.nanoTime()J") {
+                __jrt_ready.push(__jrt_timers.remove(0))
+            }
+        } else {
+            break
+        }
+    }
+    var response = __jvm("virtual! java/util/concurrent/CompletableFuture.get()Ljava/lang/Object;", answer) catch err {
+        fail "cannot fetch " + __jrt_quote(url) + ": " + err.message
+    }
+    var status = __jvm("interface java/net/http/HttpResponse.statusCode()I", response)
+    if status < 200 || status > 299 {
+        fail "cannot fetch " + __jrt_quote(url) + ": HTTP {status}"
+    }
+    return __jvm("interface java/net/http/HttpResponse.body()Ljava/lang/Object;", response)
 }
